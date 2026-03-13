@@ -14,6 +14,7 @@ import {
   Loader2,
   CheckCircle2,
   Sparkles,
+  Download,
 } from 'lucide-react';
 import MarkdownMessage from '@/components/MarkdownMessage';
 
@@ -21,6 +22,14 @@ type LLMOpinion = {
   provider: string;
   model: string;
   content: string;
+};
+
+type ExportFormat = 'csv' | 'xlsx' | 'pdf';
+
+type ExportRequestInfo = {
+  format: ExportFormat;
+  baseName: string;
+  label: string;
 };
 
 type Message = {
@@ -32,6 +41,7 @@ type Message = {
   cypher?: string;
   modelResponses?: LLMOpinion[];
   error?: boolean;
+  exportRequest?: ExportRequestInfo;
 };
 
 type ProgressStage =
@@ -76,9 +86,6 @@ type StreamFinalPayload = {
   records?: Record<string, unknown>[];
   modelResponses?: LLMOpinion[];
 };
-
-const CHAT_HISTORY_KEY = 'analysis-chat-history-v2';
-const MAX_SAVED_MESSAGES = 120;
 
 function getTimestamp() {
   return new Date().toLocaleTimeString([], {
@@ -277,6 +284,19 @@ function getSuggestions(messages: Message[]): string[] {
   return Array.from(new Set(suggestions)).slice(0, 5);
 }
 
+function detectRequestedExportFormat(query: string): ExportFormat | null {
+  const q = query.toLowerCase();
+  if (
+    !/(export|download|file|excel|xlsx|csv|pdf|sheet|report)/i.test(query)
+  ) {
+    return null;
+  }
+  if (/\bexcel\b|\bxlsx\b|\bsheet\b/.test(q)) return 'xlsx';
+  if (/\bcsv\b/.test(q)) return 'csv';
+  if (/\bpdf\b|\breport\b/.test(q)) return 'pdf';
+  return 'xlsx';
+}
+
 async function consumeSSE(
   res: Response,
   onEvent: (event: string, data: unknown) => void,
@@ -333,42 +353,8 @@ export default function AnalyzePage() {
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(CHAT_HISTORY_KEY);
-      if (!raw) {
-        setMessages([getWelcomeMessage()]);
-        return;
-      }
-
-      const parsed = JSON.parse(raw) as Message[];
-      if (!Array.isArray(parsed) || parsed.length === 0) {
-        setMessages([getWelcomeMessage()]);
-        return;
-      }
-
-      const normalized = parsed
-        .filter(
-          (m) =>
-            m &&
-            (m.role === 'user' || m.role === 'system') &&
-            typeof m.content === 'string' &&
-            typeof m.timestamp === 'string',
-        )
-        .slice(-MAX_SAVED_MESSAGES);
-
-      setMessages(normalized.length ? normalized : [getWelcomeMessage()]);
-    } catch {
-      setMessages([getWelcomeMessage()]);
-    }
+    setMessages([getWelcomeMessage()]);
   }, []);
-
-  useEffect(() => {
-    if (!messages.length) return;
-    localStorage.setItem(
-      CHAT_HISTORY_KEY,
-      JSON.stringify(messages.slice(-MAX_SAVED_MESSAGES)),
-    );
-  }, [messages]);
 
   // Auto-scroll to bottom on new messages or operation updates
   useEffect(() => {
@@ -377,11 +363,46 @@ export default function AnalyzePage() {
 
   const suggestions = useMemo(() => getSuggestions(messages), [messages]);
 
+  const downloadRecordsAsFile = async (
+    records: Record<string, unknown>[],
+    format: ExportFormat,
+    baseName: string,
+  ) => {
+    const res = await fetch('/api/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        format,
+        records,
+        filename: baseName,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(err || 'Export generation failed.');
+    }
+
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename=\"?([^"]+)\"?/i);
+    const fileName = match?.[1] || `${baseName}.${format}`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isProcessing) return;
 
     const userQuery = input.trim();
+    const requestedExportFormat = detectRequestedExportFormat(userQuery);
     const newUserMsg: Message = {
       id: Date.now().toString(),
       role: 'user',
@@ -446,6 +467,14 @@ export default function AnalyzePage() {
             content,
             timestamp: getTimestamp(),
             records: data.records,
+            exportRequest:
+              requestedExportFormat && data.records?.length
+                ? {
+                    format: requestedExportFormat,
+                    baseName: 'cypher_export',
+                    label: `Download ${requestedExportFormat.toUpperCase()}`,
+                  }
+                : undefined,
           };
           setMessages((prev) => [...prev, newSystemMsg]);
         } else {
@@ -512,6 +541,14 @@ export default function AnalyzePage() {
           records: payload.records,
           cypher: payload.cypher,
           modelResponses: payload.modelResponses,
+          exportRequest:
+            requestedExportFormat && payload.records?.length
+              ? {
+                  format: requestedExportFormat,
+                  baseName: 'investigation_export',
+                  label: `Download ${requestedExportFormat.toUpperCase()}`,
+                }
+              : undefined,
         };
 
         setMessages((prev) => [...prev, newSystemMsg]);
@@ -641,6 +678,24 @@ export default function AnalyzePage() {
                       }`}
                       content={msg.content}
                     />
+                  )}
+                  {msg.exportRequest && msg.records && msg.records.length > 0 && (
+                    <div className="mt-3">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void downloadRecordsAsFile(
+                            msg.records as Record<string, unknown>[],
+                            msg.exportRequest?.format as ExportFormat,
+                            msg.exportRequest?.baseName || 'investigation_export',
+                          )
+                        }
+                        className="inline-flex items-center gap-2 rounded-md border border-brand-light/40 bg-white px-3 py-1.5 text-xs font-semibold text-brand-dark hover:bg-brand-light/10 transition-colors"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        {msg.exportRequest.label}
+                      </button>
+                    </div>
                   )}
 
                   {msg.role === 'system' &&
