@@ -1,26 +1,160 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
 :root {
-  --background: #ffffff;
+  --background: #fdfdfd;
   --foreground: #171717;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-brand-light: #9bafd9;
+  --color-brand-dark: #103783;
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+.chat-markdown {
+  overflow-wrap: anywhere;
+}
+
+.chat-markdown p {
+  margin: 0.5rem 0;
+}
+
+.chat-markdown h1,
+.chat-markdown h2,
+.chat-markdown h3,
+.chat-markdown h4 {
+  margin: 0.7rem 0 0.35rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.chat-markdown ul,
+.chat-markdown ol {
+  margin: 0.5rem 0;
+  padding-left: 1.2rem;
+}
+
+.chat-markdown li {
+  margin: 0.2rem 0;
+}
+
+.chat-markdown code {
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.35rem;
+  font-size: 0.84em;
+  padding: 0.1rem 0.35rem;
+}
+
+.chat-markdown pre {
+  background: #0f172a;
+  color: #f8fafc;
+  border-radius: 0.5rem;
+  overflow: auto;
+  padding: 0.8rem;
+  margin: 0.6rem 0;
+}
+
+.chat-markdown pre code {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0;
+}
+
+.markdown-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid #dbe4f0;
+  border-radius: 0.5rem;
+  margin: 0.6rem 0;
+}
+
+.markdown-table-wrap table {
+  border-collapse: collapse;
+  min-width: 620px;
+  width: 100%;
+  font-size: 0.86rem;
+  background: #fff;
+}
+
+.markdown-table-wrap th,
+.markdown-table-wrap td {
+  border-bottom: 1px solid #e8edf5;
+  padding: 0.5rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-table-wrap th {
+  background: #f8fafc;
+  font-weight: 700;
+}
+
+.markdown-mermaid {
+  background: #fff;
+  border: 1px solid #dbe4f0;
+  border-radius: 0.5rem;
+  margin: 0.6rem 0;
+  overflow-x: auto;
+  padding: 0.75rem;
+}
+
+.markdown-mermaid svg {
+  display: block;
+  height: auto;
+  margin: 0 auto;
+  max-width: 100%;
+}
+
+.markdown-mermaid-fallback {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 0.5rem;
+  color: #9a3412;
+  font-size: 0.85rem;
+  margin: 0.6rem 0;
+  padding: 0.65rem;
+}
+
+.suggestion-chip {
+  animation: fade-in-up 320ms ease both;
+  background: linear-gradient(135deg, #f8fbff 0%, #eef4ff 100%);
+  border: 1px solid #d7e4ff;
+  border-radius: 9999px;
+  color: #103783;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.4rem 0.75rem;
+  transition: all 220ms ease;
+}
+
+.suggestion-chip:hover {
+  background: linear-gradient(135deg, #edf4ff 0%, #dfebff 100%);
+  border-color: #b8cdfc;
+  transform: translateY(-1px);
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 260ms ease both;
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
