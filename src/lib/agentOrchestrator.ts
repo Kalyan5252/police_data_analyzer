@@ -34,6 +34,9 @@ type RunOptions = {
   onProgress?: (event: InvestigationProgressEvent) => void | Promise<void>;
 };
 
+const MAX_HOPS = 4;
+const PATH_RETURN_LIMIT = 10;
+
 function buildHistoryContext(history: ConversationTurn[]): string {
   if (!history.length) return '';
   const recent = history.slice(-8);
@@ -44,6 +47,74 @@ function buildHistoryContext(history: ConversationTurn[]): string {
     })
     .join('\n');
   return `Recent conversation context:\n${context}\n`;
+}
+
+function stripCypherFence(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith('```')) return trimmed;
+  return trimmed.replace(/^```[a-zA-Z]*\n?/, '').replace(/```$/, '').trim();
+}
+
+function normalizeCypherForSafety(cypher: string): string {
+  let query = cypher.trim().replace(/;+$/, '');
+
+  // Cap variable-length traversals to MAX_HOPS for CPU safety.
+  query = query
+    .replace(
+      /(\*\s*(\d+)\s*\.\.\s*)(\d+)/g,
+      (_, prefix: string, lower: string, upper: string) =>
+        `${prefix}${Math.min(Number(upper), MAX_HOPS) || Number(lower)}`,
+    )
+    .replace(/\*\s*\.\.\s*(\d+)/g, (_m: string, upper: string) => {
+      const capped = Math.min(Number(upper), MAX_HOPS) || MAX_HOPS;
+      return `*1..${capped}`;
+    });
+
+  return query;
+}
+
+function extractMsisdn(userQuery: string): string | null {
+  const match = userQuery.match(/\b(\d{10,15})\b/);
+  return match ? match[1] : null;
+}
+
+function extractCellId(userQuery: string): string | null {
+  const explicit = userQuery.match(
+    /\bcell[_\s-]?id\b\s*[:=]?\s*['"]?([A-Za-z0-9_-]{5,})/i,
+  );
+  if (explicit) return explicit[1];
+
+  const tower = userQuery.match(/\btower\b\s*[:=]?\s*['"]?([A-Za-z0-9_-]{5,})/i);
+  if (tower) return tower[1];
+
+  return null;
+}
+
+function detectPhoneToLocationPathIntent(
+  userQuery: string,
+): { msisdn: string; cellId: string } | null {
+  const q = userQuery.toLowerCase();
+  const asksPath =
+    q.includes('connect') ||
+    q.includes('path') ||
+    q.includes('linked') ||
+    q.includes('relation') ||
+    q.includes('tower');
+
+  if (!asksPath) return null;
+
+  const msisdn = extractMsisdn(userQuery);
+  const cellId = extractCellId(userQuery);
+  if (!msisdn || !cellId) return null;
+
+  return { msisdn, cellId };
+}
+
+function buildPhoneLocationPathQuery(msisdn: string, cellId: string): string {
+  return `MATCH (a:PhoneNumber {msisdn: '${msisdn}'}), (b:Location {cell_id: '${cellId}'})
+MATCH p = shortestPath((a)-[*1..${MAX_HOPS}]-(b))
+RETURN p
+LIMIT ${PATH_RETURN_LIMIT}`;
 }
 
 function isSmallTalk(message: string): boolean {
@@ -92,15 +163,7 @@ async function generateCypher(
 
   // Use OpenAI mini model as primary query generator
   const response = await callLLM('openai', 'gpt-4o-mini', [system, user]);
-  // Ensure we only return the Cypher (strip markdown fences if present)
-  const raw = response.content.trim();
-  if (raw.startsWith('```')) {
-    const withoutFence = raw
-      .replace(/^```[a-zA-Z]*\n?/, '')
-      .replace(/```$/, '');
-    return withoutFence.trim();
-  }
-  return raw;
+  return normalizeCypherForSafety(stripCypherFence(response.content));
 }
 
 async function runCypher(cypher: string): Promise<Record<string, unknown>[]> {
@@ -204,7 +267,17 @@ export async function runInvestigationTurn(
     stage: 'planning_query',
     message: 'Planning graph query from your natural language request.',
   });
-  const cypher = await generateCypher(userQuery, historyContext);
+  const pathIntent = detectPhoneToLocationPathIntent(userQuery);
+  let cypher = '';
+  if (pathIntent) {
+    cypher = buildPhoneLocationPathQuery(pathIntent.msisdn, pathIntent.cellId);
+    await emit({
+      stage: 'planning_query',
+      message: `Detected path-traversal intent between ${pathIntent.msisdn} and cell ${pathIntent.cellId}. Using bounded shortest-path traversal.`,
+    });
+  } else {
+    cypher = await generateCypher(userQuery, historyContext);
+  }
   await emit({
     stage: 'query_ready',
     message: 'Cypher query prepared.',
@@ -216,7 +289,37 @@ export async function runInvestigationTurn(
     stage: 'fetching_data',
     message: 'Executing Cypher and fetching records from Neo4j.',
   });
-  const records = await runCypher(cypher);
+  let records: Record<string, unknown>[] = [];
+  try {
+    records = await runCypher(cypher);
+  } catch (err) {
+    // Fallback path traversal only for connectivity/path questions.
+    const fallback = pathIntent ?? detectPhoneToLocationPathIntent(userQuery);
+    if (!fallback) throw err;
+    cypher = buildPhoneLocationPathQuery(fallback.msisdn, fallback.cellId);
+    await emit({
+      stage: 'fetching_data',
+      message:
+        'Primary query failed. Retrying with bounded shortest-path traversal fallback.',
+      meta: { fallbackCypher: cypher },
+    });
+    records = await runCypher(cypher);
+  }
+
+  // If path question returned no rows, attempt a second bounded variant using all paths.
+  if (records.length === 0 && pathIntent) {
+    const allPathsCypher = `MATCH p = (a:PhoneNumber {msisdn: '${pathIntent.msisdn}'})-[*1..${MAX_HOPS}]-(b:Location {cell_id: '${pathIntent.cellId}'})
+RETURN p
+LIMIT ${PATH_RETURN_LIMIT}`;
+    await emit({
+      stage: 'fetching_data',
+      message:
+        'No shortest-path result found. Running bounded all-path traversal as fallback.',
+      meta: { fallbackCypher: allPathsCypher },
+    });
+    cypher = allPathsCypher;
+    records = await runCypher(cypher);
+  }
   await emit({
     stage: 'data_fetched',
     message: `Fetched ${records.length} record(s) from the graph.`,

@@ -77,6 +77,17 @@ REQUIREMENTS
   - A phone number like 990000, assume it corresponds to PhoneNumber.msisdn unless otherwise specified.
 - When no exact match semantics are clear, use a reasonable filter (for example, contains or starts with) and LIMIT 50 to avoid huge responses.
 -
+- MULTI-HOP / PATH-TRAVERSAL RULES (CPU-SAFE)
+- When the user asks whether two entities are connected, linked, or asks to "find path", generate a bounded path traversal query.
+- For phone-to-location connectivity (PhoneNumber.msisdn to Location.cell_id), prefer:
+-   MATCH (a:PhoneNumber {msisdn: '<MSISDN>'}), (b:Location {cell_id: '<CELL_ID>'})
+-   MATCH p = shortestPath((a)-[*1..4]-(b))
+-   RETURN p
+-   LIMIT 10
+- Use bounded traversal only (max hop upper bound 4 unless explicitly required lower).
+- Never generate unbounded variable-length patterns like [*] or [*..].
+- Always include LIMIT for path queries.
+-
 - ID AND BUSINESS-KEY HANDLING
 - Never search, filter, or JOIN by the generic "id" property on nodes; this field is only an internal record identifier and has no business meaning.
 - For FinancialTransaction, when the user refers to a "transaction id", ALWAYS use the txn_id property (NOT id) in WHERE clauses and RETURN lists.
@@ -85,4 +96,3 @@ REQUIREMENTS
 OUTPUT FORMAT
 - Return only the Cypher query string, nothing else.
 `;
-
