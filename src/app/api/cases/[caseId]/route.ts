@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDriver } from '@/lib/neo4j';
+import { pgQuery, withPgClient } from '@/lib/postgres';
 
 export async function PATCH(
   req: NextRequest,
@@ -18,31 +18,26 @@ export async function PATCH(
     return NextResponse.json({ error: 'title is required.' }, { status: 400 });
   }
 
-  const driver = getDriver();
-  const session = driver.session();
-
   try {
-    const result = await session.run(
+    const result = await pgQuery<{ caseId: string; title: string }>(
       `
-      MATCH (c:CaseHistory {case_id: $caseId})
-      SET c.title = $title,
-          c.updated_at = datetime()
-      RETURN c.case_id AS caseId, c.title AS title
+      UPDATE case_histories
+      SET title = $2,
+          updated_at = NOW()
+      WHERE case_id = $1
+      RETURNING case_id AS "caseId", title
       `,
-      { caseId, title },
+      [caseId, title],
     );
 
-    if (result.records.length === 0) {
+    if (result.rowCount === 0) {
       return NextResponse.json({ error: 'Case not found.' }, { status: 404 });
     }
 
     return NextResponse.json(
       {
         success: true,
-        case: {
-          caseId: String(result.records[0].get('caseId')),
-          title: String(result.records[0].get('title')),
-        },
+        case: result.rows[0],
       },
       { status: 200 },
     );
@@ -50,8 +45,6 @@ export async function PATCH(
     const message =
       err instanceof Error ? err.message : 'Failed to rename conversation.';
     return NextResponse.json({ error: message }, { status: 500 });
-  } finally {
-    await session.close();
   }
 }
 
@@ -64,23 +57,23 @@ export async function DELETE(
     return NextResponse.json({ error: 'caseId is required.' }, { status: 400 });
   }
 
-  const driver = getDriver();
-  const session = driver.session();
-
   try {
-    const result = await session.run(
-      `
-      MATCH (c:CaseHistory {case_id: $caseId})
-      OPTIONAL MATCH (c)-[:HAS_MESSAGE]->(m:ChatMessage)
-      WITH c, collect(m) AS messages
-      FOREACH (msg IN messages | DETACH DELETE msg)
-      DETACH DELETE c
-      RETURN $caseId AS caseId
-      `,
-      { caseId },
-    );
+    const deleted = await withPgClient(async (client) => {
+      await client.query('BEGIN');
+      try {
+        const result = await client.query(
+          'DELETE FROM case_histories WHERE case_id = $1 RETURNING case_id',
+          [caseId],
+        );
+        await client.query('COMMIT');
+        return result.rowCount ?? 0;
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      }
+    });
 
-    if (result.records.length === 0) {
+    if (deleted === 0) {
       return NextResponse.json({ error: 'Case not found.' }, { status: 404 });
     }
 
@@ -89,7 +82,5 @@ export async function DELETE(
     const message =
       err instanceof Error ? err.message : 'Failed to delete conversation.';
     return NextResponse.json({ error: message }, { status: 500 });
-  } finally {
-    await session.close();
   }
 }

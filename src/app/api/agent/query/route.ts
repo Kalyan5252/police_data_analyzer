@@ -4,16 +4,56 @@ import {
   InvestigationProgressEvent,
   runInvestigationTurn,
 } from '@/lib/agentOrchestrator';
+import { pgQuery } from '@/lib/postgres';
 
 type AgentRequestBody = {
   message?: string;
   stream?: boolean;
   history?: ConversationTurn[];
+  caseId?: string;
 };
+
+function dedupeTurns(turns: ConversationTurn[]): ConversationTurn[] {
+  const out: ConversationTurn[] = [];
+  for (const turn of turns) {
+    const content = typeof turn.content === 'string' ? turn.content.trim() : '';
+    if (!content) continue;
+    const normalized: ConversationTurn = { role: turn.role, content };
+    const last = out[out.length - 1];
+    if (last && last.role === normalized.role && last.content === normalized.content) {
+      continue;
+    }
+    out.push(normalized);
+  }
+  return out;
+}
+
+async function loadCaseHistory(caseId: string): Promise<ConversationTurn[]> {
+  const result = await pgQuery<{ role: string; content: string }>(
+    `
+    SELECT role, content
+    FROM chat_messages
+    WHERE case_id = $1
+    ORDER BY created_at ASC
+    LIMIT 1000
+    `,
+    [caseId],
+  );
+
+  return result.rows
+    .map((r: { role: string; content: string }): ConversationTurn => {
+      const role: 'user' | 'system' = r.role === 'user' ? 'user' : 'system';
+      return {
+        role,
+        content: r.content ?? '',
+      };
+    })
+    .filter((t: ConversationTurn) => t.content.trim().length > 0);
+}
 
 export async function POST(req: NextRequest) {
   try {
-    const { message, stream, history } = (await req.json()) as AgentRequestBody;
+    const { message, stream, history, caseId } = (await req.json()) as AgentRequestBody;
 
     if (!message || typeof message !== 'string') {
       return NextResponse.json(
@@ -30,8 +70,14 @@ export async function POST(req: NextRequest) {
               (turn.role === 'user' || turn.role === 'system') &&
               typeof turn.content === 'string',
           )
-          .slice(-12)
+          .slice(-60)
       : [];
+
+    const dbHistory =
+      typeof caseId === 'string' && caseId.trim()
+        ? await loadCaseHistory(caseId.trim())
+        : [];
+    const mergedHistory = dedupeTurns([...dbHistory, ...normalizedHistory]).slice(-60);
 
     if (stream) {
       const encoder = new TextEncoder();
@@ -52,7 +98,7 @@ export async function POST(req: NextRequest) {
           const run = async () => {
             try {
               const result = await runInvestigationTurn(message, {
-                history: normalizedHistory,
+                history: mergedHistory,
                 onProgress: async (event: InvestigationProgressEvent) => {
                   writeSse(controller, 'progress', event);
                 },
@@ -64,6 +110,8 @@ export async function POST(req: NextRequest) {
                 cypher: result.cypher,
                 records: result.records,
                 modelResponses: result.modelResponses,
+                candidateQueries: result.candidateQueries,
+                queryEvaluation: result.queryEvaluation,
               });
             } catch (err: unknown) {
               const errMessage =
@@ -90,7 +138,7 @@ export async function POST(req: NextRequest) {
     }
 
     const result = await runInvestigationTurn(message, {
-      history: normalizedHistory,
+      history: mergedHistory,
     });
 
     return NextResponse.json(
@@ -100,6 +148,8 @@ export async function POST(req: NextRequest) {
         cypher: result.cypher,
         records: result.records,
         modelResponses: result.modelResponses,
+        candidateQueries: result.candidateQueries,
+        queryEvaluation: result.queryEvaluation,
       },
       { status: 200 },
     );

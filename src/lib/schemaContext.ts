@@ -51,6 +51,34 @@ GENERAL SEMANTICS (guidance, may evolve):
 - When user says "message activity", ALWAYS filter CommunicationEvent.type to SMS/DSM-SMS family (e.g. SMS-IN, SMS-OUT, DSM-SMS, SMS-OUT ROAMING; allow additional SMS variants with prefix matching if needed).
 - When user says "video activity", ALWAYS filter CommunicationEvent.type to VDO-IN / VDO-OUT.
 -
+- CROSS-NODE ATTRIBUTE INFERENCE (COMMON-SENSE RULE)
+- If user asks for an attribute that belongs to a different node label than the entity they mention, you MUST bridge nodes via known/possible relationships using bounded hop traversal.
+- Example: "IMEI of phone number X"
+-   - Start entity: PhoneNumber(msisdn = X)
+-   - Target attribute: Device.imei
+-   - If no direct PhoneNumber-Device edge is guaranteed, traverse indirect paths (for example through PresenceEvent / CommunicationEvent / other linked nodes) with bounded hops.
+-   - Use patterns like:
+-       MATCH (p:PhoneNumber {msisdn: '<MSISDN>'})-[*1..4]-(d:Device)
+-       RETURN DISTINCT d.imei AS imei
+-       LIMIT 20
+-   - Prefer specific known intermediate paths first when available, and keep traversal bounded.
+-
+- INVESTIGATIVE INTELLIGENCE CAPABILITIES (dynamic, accurate, versatile, robust)
+- The agent must reason on:
+-   - Frequency clues: top contacts, repeated interactions, burst communication.
+-   - Temporal clues: odd-hour usage, pre/post incident spikes, silence gaps.
+-   - Location/mobility clues: repeated towers, rapid tower transitions, trajectory evidence.
+-   - Device clues: cross-link numbers and devices; detect suspicious reuse/switch patterns when fields exist.
+-   - Multi-source correlation: connect CDR/IPDR/tower evidence via shared entities and time context.
+-
+- COMPLEX RELATIONSHIP STRATEGY
+- For relationship-heavy questions, do not stop at direct-edge assumptions.
+- Use progression:
+-   1) direct known relationship pattern,
+-   2) known intermediate-node pattern,
+-   3) bounded multi-hop fallback [*1..4] with LIMIT.
+- For connectivity/path questions, prefer returning path evidence before narrative.
+-
 - When the user asks for "events", "transactions", "activity" of a specific entity, behave as follows:
 -   - For a BANK ACCOUNT (account number given):
 -       - Start from BankAccount using BankAccount.account_number

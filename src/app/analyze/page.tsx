@@ -26,11 +26,16 @@ type LLMOpinion = {
 };
 
 type ExportFormat = 'csv' | 'xlsx' | 'pdf';
+type ExportMode = 'records' | 'detailed';
 
 type ExportRequestInfo = {
   format: ExportFormat;
+  mode: ExportMode;
   baseName: string;
   label: string;
+  query?: string;
+  explanation?: string;
+  cypher?: string;
 };
 
 type Message = {
@@ -41,6 +46,8 @@ type Message = {
   createdAt?: string;
   records?: Record<string, unknown>[];
   cypher?: string;
+  candidateQueries?: string[];
+  queryEvaluation?: string;
   modelResponses?: LLMOpinion[];
   error?: boolean;
   exportRequest?: ExportRequestInfo;
@@ -85,6 +92,8 @@ type StreamFinalPayload = {
   success: boolean;
   finalAnswer: string;
   cypher?: string;
+  candidateQueries?: string[];
+  queryEvaluation?: string;
   records?: Record<string, unknown>[];
   modelResponses?: LLMOpinion[];
 };
@@ -304,6 +313,27 @@ function detectRequestedExportFormat(query: string): ExportFormat | null {
   return 'xlsx';
 }
 
+function detectExportMode(query: string): ExportMode {
+  const q = query.toLowerCase();
+  if (
+    /\bonly records\b|\bjust records\b|\brecords only\b|\bonly data\b|\braw records\b/.test(
+      q,
+    )
+  ) {
+    return 'records';
+  }
+
+  if (
+    /\bdetailed\b|\bdetail explanation\b|\bexplain\b|\breasoning\b|\banalysis\b|\binsight\b|\bwhy\b/.test(
+      q,
+    )
+  ) {
+    return 'detailed';
+  }
+
+  return 'records';
+}
+
 async function consumeSSE(
   res: Response,
   onEvent: (event: string, data: unknown) => void,
@@ -354,6 +384,14 @@ type CasePayload = {
   title: string;
 };
 
+type CaseSummary = {
+  caseId: string;
+  title: string;
+  updatedAt: string;
+  createdAt: string;
+  lastMessagePreview: string;
+};
+
 export default function AnalyzePage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -384,6 +422,16 @@ export default function AnalyzePage() {
       caseId: String(data.case.caseId),
       title: String(data.case.title ?? ''),
     };
+  };
+
+  const getLatestCase = async (): Promise<CaseSummary | null> => {
+    const res = await fetch('/api/cases', { cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok || !data.success || !Array.isArray(data.cases)) {
+      return null;
+    }
+    const first = (data.cases as CaseSummary[])[0];
+    return first ?? null;
   };
 
   const loadCaseMessages = async (caseId: string) => {
@@ -432,9 +480,15 @@ export default function AnalyzePage() {
       try {
         let selectedCaseId = caseParam;
         if (!selectedCaseId) {
-          const created = await createCaseIfMissing();
-          selectedCaseId = created.caseId;
-          router.replace(`/analyze?case=${encodeURIComponent(created.caseId)}`);
+          const latestCase = await getLatestCase();
+          if (latestCase?.caseId) {
+            selectedCaseId = latestCase.caseId;
+            router.replace(`/analyze?case=${encodeURIComponent(latestCase.caseId)}`);
+          } else {
+            const created = await createCaseIfMissing();
+            selectedCaseId = created.caseId;
+            router.replace(`/analyze?case=${encodeURIComponent(created.caseId)}`);
+          }
         }
         if (!selectedCaseId || ignore) return;
         setActiveCaseId(selectedCaseId);
@@ -467,6 +521,12 @@ export default function AnalyzePage() {
     records: Record<string, unknown>[],
     format: ExportFormat,
     baseName: string,
+    options?: {
+      mode?: ExportMode;
+      query?: string;
+      explanation?: string;
+      cypher?: string;
+    },
   ) => {
     const res = await fetch('/api/export', {
       method: 'POST',
@@ -475,6 +535,10 @@ export default function AnalyzePage() {
         format,
         records,
         filename: baseName,
+        mode: options?.mode || 'records',
+        query: options?.query || '',
+        explanation: options?.explanation || '',
+        cypher: options?.cypher || '',
       }),
     });
 
@@ -511,6 +575,7 @@ export default function AnalyzePage() {
 
     const userQuery = input.trim();
     const requestedExportFormat = detectRequestedExportFormat(userQuery);
+    const requestedExportMode = detectExportMode(userQuery);
     const newUserMsg: Message = {
       id: Date.now().toString(),
       role: 'user',
@@ -521,7 +586,7 @@ export default function AnalyzePage() {
 
     const historyForContext = messages
       .filter((m) => m.role === 'user' || m.role === 'system')
-      .slice(-10)
+      .slice(-60)
       .map((m) => ({ role: m.role, content: m.content }));
 
     setMessages((prev) => [...prev, newUserMsg]);
@@ -530,6 +595,8 @@ export default function AnalyzePage() {
     void persistMessage(activeCaseId, newUserMsg).then(() =>
       window.dispatchEvent(new Event('case-history-updated')),
     );
+
+    let agentRetriesExhausted = false;
 
     try {
       const isLikelyCypher = /^\s*(match|merge|create|with|return)\b/i.test(
@@ -584,8 +651,14 @@ export default function AnalyzePage() {
               requestedExportFormat && data.records?.length
                 ? {
                     format: requestedExportFormat,
+                    mode: requestedExportMode,
                     baseName: 'cypher_export',
-                    label: `Download ${requestedExportFormat.toUpperCase()}`,
+                    label:
+                      requestedExportMode === 'detailed'
+                        ? `Download ${requestedExportFormat.toUpperCase()} (Detailed)`
+                        : `Download ${requestedExportFormat.toUpperCase()}`,
+                    query: userQuery,
+                    explanation: content,
                   }
                 : undefined,
           };
@@ -597,87 +670,133 @@ export default function AnalyzePage() {
           throw new Error(data.error || 'Unknown error from server.');
         }
       } else {
-        setOperationState(createInitialOperation('agent'));
+        const AGENT_MAX_ATTEMPTS = 3;
+        let lastAgentError: Error | null = null;
 
-        const res = await fetch('/api/agent/query', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: userQuery,
-            history: historyForContext,
-            stream: true,
-          }),
-        });
-
-        if (!res.ok || !res.body) {
-          const text = await res.text();
-          throw new Error(text || `Request failed (${res.status}).`);
-        }
-
-        let finalPayload: StreamFinalPayload | null = null;
-        let streamError: string | null = null;
-
-        await consumeSSE(res, (event, payload) => {
-          if (event === 'progress') {
-            const progress = payload as AgentProgressEvent;
-            setOperationState((prev) =>
-              prev ? applyProgressEvent(prev, progress) : prev,
+        for (let attempt = 0; attempt < AGENT_MAX_ATTEMPTS; attempt++) {
+          if (attempt > 0) {
+            const retryMsg: Message = {
+              id: `${Date.now()}-retry-${attempt}`,
+              role: 'system',
+              content: 'Failed to generate, trying again.',
+              timestamp: getTimestamp(),
+              createdAt: getMessageCreatedAt(),
+            };
+            setMessages((prev) => [...prev, retryMsg]);
+            void persistMessage(activeCaseId, retryMsg).then(() =>
+              window.dispatchEvent(new Event('case-history-updated')),
             );
-            return;
           }
 
-          if (event === 'final') {
-            finalPayload = payload as StreamFinalPayload;
-            return;
-          }
+          setOperationState(createInitialOperation('agent'));
 
-          if (event === 'error') {
-            const errPayload = payload as { error?: string };
-            streamError = errPayload.error || 'Agent stream failed.';
-          }
-        });
+          try {
+            const res = await fetch('/api/agent/query', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                message: userQuery,
+                history: historyForContext,
+                caseId: activeCaseId,
+                stream: true,
+              }),
+            });
 
-        if (streamError) {
-          throw new Error(streamError);
-        }
+            if (!res.ok || !res.body) {
+              const text = await res.text();
+              throw new Error(text || `Request failed (${res.status}).`);
+            }
 
-        if (!finalPayload) {
-          throw new Error('Agent stream ended without a final response.');
-        }
-        const payload = finalPayload as StreamFinalPayload;
-        if (!payload.success) {
-          throw new Error('Agent response failed.');
-        }
+            let finalPayload: StreamFinalPayload | null = null;
+            let streamError: string | null = null;
 
-        const newSystemMsg: Message = {
-          id: (Date.now() + 1).toString(),
-          role: 'system',
-          content: payload.finalAnswer,
-          timestamp: getTimestamp(),
-          createdAt: getMessageCreatedAt(),
-          records: payload.records,
-          cypher: payload.cypher,
-          modelResponses: payload.modelResponses,
+            await consumeSSE(res, (event, payload) => {
+              if (event === 'progress') {
+                const progress = payload as AgentProgressEvent;
+                setOperationState((prev) =>
+                  prev ? applyProgressEvent(prev, progress) : prev,
+                );
+                return;
+              }
+
+              if (event === 'final') {
+                finalPayload = payload as StreamFinalPayload;
+                return;
+              }
+
+              if (event === 'error') {
+                const errPayload = payload as { error?: string };
+                streamError = errPayload.error || 'Agent stream failed.';
+              }
+            });
+
+            if (streamError) {
+              throw new Error(streamError);
+            }
+
+            if (!finalPayload) {
+              throw new Error('Agent stream ended without a final response.');
+            }
+            const payload = finalPayload as StreamFinalPayload;
+            if (!payload.success) {
+              throw new Error('Agent response failed.');
+            }
+
+            const newSystemMsg: Message = {
+              id: (Date.now() + 1).toString(),
+              role: 'system',
+              content: payload.finalAnswer,
+              timestamp: getTimestamp(),
+              createdAt: getMessageCreatedAt(),
+              records: payload.records,
+              cypher: payload.cypher,
+              candidateQueries: payload.candidateQueries,
+              queryEvaluation: payload.queryEvaluation,
+              modelResponses: payload.modelResponses,
           exportRequest:
             requestedExportFormat && payload.records?.length
               ? {
                   format: requestedExportFormat,
+                  mode: requestedExportMode,
                   baseName: 'investigation_export',
-                  label: `Download ${requestedExportFormat.toUpperCase()}`,
+                  label:
+                    requestedExportMode === 'detailed'
+                      ? `Download ${requestedExportFormat.toUpperCase()} (Detailed)`
+                      : `Download ${requestedExportFormat.toUpperCase()}`,
+                  query: userQuery,
+                  explanation: payload.finalAnswer,
+                  cypher: payload.cypher,
                 }
               : undefined,
         };
 
-        setMessages((prev) => [...prev, newSystemMsg]);
-        void persistMessage(activeCaseId, newSystemMsg).then(() =>
-          window.dispatchEvent(new Event('case-history-updated')),
-        );
+            setMessages((prev) => [...prev, newSystemMsg]);
+            void persistMessage(activeCaseId, newSystemMsg).then(() =>
+              window.dispatchEvent(new Event('case-history-updated')),
+            );
+            lastAgentError = null;
+            break;
+          } catch (inner) {
+            lastAgentError =
+              inner instanceof Error ? inner : new Error(String(inner));
+            if (attempt < AGENT_MAX_ATTEMPTS - 1) {
+              continue;
+            }
+            agentRetriesExhausted = true;
+            throw lastAgentError;
+          }
+        }
       }
     } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      const content = agentRetriesExhausted
+        ? `Could not complete your request after several attempts.\n\n${detail}\n\nPlease report this issue if it continues.`
+        : `Network error: Could not reach the query service. ${detail}`;
+
       const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'system',
-        content: `Network error: Could not reach the query service. ${err instanceof Error ? err.message : ''}`,
+        content,
         timestamp: getTimestamp(),
         createdAt: getMessageCreatedAt(),
         error: true,
@@ -829,6 +948,12 @@ export default function AnalyzePage() {
                             msg.records as Record<string, unknown>[],
                             msg.exportRequest?.format as ExportFormat,
                             msg.exportRequest?.baseName || 'investigation_export',
+                            {
+                              mode: msg.exportRequest?.mode || 'records',
+                              query: msg.exportRequest?.query || '',
+                              explanation: msg.exportRequest?.explanation || '',
+                              cypher: msg.exportRequest?.cypher || msg.cypher || '',
+                            },
                           )
                         }
                         className="inline-flex items-center gap-2 rounded-md border border-brand-light/40 bg-white px-3 py-1.5 text-xs font-semibold text-brand-dark hover:bg-brand-light/10 transition-colors"
@@ -840,8 +965,49 @@ export default function AnalyzePage() {
                   )}
 
                   {msg.role === 'system' &&
-                    (msg.cypher || msg.records || msg.modelResponses) && (
+                    (msg.cypher ||
+                      msg.records ||
+                      msg.modelResponses ||
+                      msg.queryEvaluation ||
+                      msg.candidateQueries?.length) && (
                       <div className="mt-4 space-y-2">
+                        {msg.queryEvaluation && (
+                          <details className="group rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                            <summary className="flex cursor-pointer items-center justify-between text-slate-600 font-semibold">
+                              <span>Query Strategy Evaluation</span>
+                              <span className="text-[10px] uppercase tracking-wide text-slate-400">
+                                VIEW
+                              </span>
+                            </summary>
+                            <div className="mt-2 whitespace-pre-wrap text-[11px] text-slate-700">
+                              {msg.queryEvaluation}
+                            </div>
+                          </details>
+                        )}
+
+                        {msg.candidateQueries && msg.candidateQueries.length > 0 && (
+                          <details className="group rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                            <summary className="flex cursor-pointer items-center justify-between text-slate-600 font-semibold">
+                              <span>
+                                Candidate Cypher Strategies ({msg.candidateQueries.length})
+                              </span>
+                              <span className="text-[10px] uppercase tracking-wide text-slate-400">
+                                VIEW
+                              </span>
+                            </summary>
+                            <div className="mt-2 space-y-2">
+                              {msg.candidateQueries.map((candidate, idx) => (
+                                <pre
+                                  key={`${msg.id}-candidate-${idx}`}
+                                  className="whitespace-pre-wrap rounded bg-slate-900/90 p-2 font-mono text-[11px] text-slate-100"
+                                >
+                                  {candidate}
+                                </pre>
+                              ))}
+                            </div>
+                          </details>
+                        )}
+
                         {msg.cypher && (
                           <details className="group rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
                             <summary className="flex cursor-pointer items-center justify-between text-slate-600 font-semibold">

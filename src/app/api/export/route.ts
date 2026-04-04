@@ -2,11 +2,16 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
 
 type ExportFormat = 'csv' | 'xlsx' | 'pdf';
+type ExportMode = 'records' | 'detailed';
 
 type ExportRequestBody = {
   format?: ExportFormat;
+  mode?: ExportMode;
   records?: Record<string, unknown>[];
   filename?: string;
+  query?: string;
+  explanation?: string;
+  cypher?: string;
 };
 
 const MAX_EXPORT_ROWS = 5000;
@@ -33,6 +38,17 @@ function csvEscape(value: unknown): string {
 function truncate(value: string, max = 220): string {
   if (value.length <= max) return value;
   return `${value.slice(0, max - 3)}...`;
+}
+
+function stripMarkdown(value: string): string {
+  return value
+    .replace(/```[\s\S]*?```/g, '[code block]')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/^#+\s+/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function stringifyValue(value: unknown): string {
@@ -116,13 +132,29 @@ function normalizeRecords(records: Record<string, unknown>[]): NormalizedTable {
   return { columns, rows };
 }
 
-function toCsv(table: NormalizedTable): string {
+function toCsv(
+  table: NormalizedTable,
+  options?: { mode?: ExportMode; query?: string; explanation?: string; cypher?: string },
+): string {
   if (!table.rows.length || !table.columns.length) return 'no_data\n';
 
   const header = table.columns.join(',');
   const rows = table.rows.map((record) =>
     table.columns.map((key) => csvEscape(record[key])).join(','),
   );
+
+  if (options?.mode === 'detailed') {
+    const meta: string[] = [];
+    if (options.query?.trim()) meta.push(`# Query: ${options.query.trim()}`);
+    if (options.cypher?.trim()) meta.push(`# Cypher: ${options.cypher.trim()}`);
+    if (options.explanation?.trim()) {
+      meta.push(`# Explanation: ${stripMarkdown(options.explanation).replace(/\n/g, ' ')}`);
+    }
+    if (meta.length) {
+      return [...meta, '', header, ...rows].join('\n');
+    }
+  }
+
   return [header, ...rows].join('\n');
 }
 
@@ -164,12 +196,58 @@ function buildSimplePdf(lines: string[]): Buffer {
   return Buffer.from(pdf, 'utf8');
 }
 
-function toPdf(table: NormalizedTable): Buffer {
+function wrapLine(input: string, maxChars = PDF_LINE_WIDTH): string[] {
+  const text = input || '';
+  if (text.length <= maxChars) return [text];
+  const words = text.split(/\s+/);
+  const out: string[] = [];
+  let current = '';
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (candidate.length <= maxChars) {
+      current = candidate;
+    } else {
+      if (current) out.push(current);
+      current = word.slice(0, maxChars);
+    }
+  }
+  if (current) out.push(current);
+  return out.length ? out : [''];
+}
+
+function toPdf(
+  table: NormalizedTable,
+  options?: { mode?: ExportMode; query?: string; explanation?: string; cypher?: string },
+): Buffer {
   const lines: string[] = [];
 
   lines.push('Investigation Export');
   lines.push(`Rows: ${table.rows.length}`);
   lines.push('');
+
+  if (options?.mode === 'detailed') {
+    lines.push('Detailed Context');
+    lines.push('-'.repeat(20));
+    if (options.query?.trim()) {
+      lines.push('Query:');
+      wrapLine(options.query.trim(), PDF_LINE_WIDTH).forEach((l) => lines.push(l));
+    }
+    if (options.cypher?.trim()) {
+      lines.push('');
+      lines.push('Generated Cypher:');
+      wrapLine(options.cypher.trim(), PDF_LINE_WIDTH).forEach((l) => lines.push(l));
+    }
+    if (options.explanation?.trim()) {
+      lines.push('');
+      lines.push('Explanation / Reasoning:');
+      wrapLine(stripMarkdown(options.explanation), PDF_LINE_WIDTH).forEach((l) =>
+        lines.push(l),
+      );
+    }
+    lines.push('');
+    lines.push('Records Table');
+    lines.push('-'.repeat(20));
+  }
 
   if (!table.rows.length || !table.columns.length) {
     lines.push('No records available.');
@@ -203,7 +281,8 @@ function toPdf(table: NormalizedTable): Buffer {
 
 export async function POST(req: NextRequest) {
   try {
-    const { format, records, filename } = (await req.json()) as ExportRequestBody;
+    const { format, records, filename, mode, query, explanation, cypher } =
+      (await req.json()) as ExportRequestBody;
 
     if (!format || !['csv', 'xlsx', 'pdf'].includes(format)) {
       return NextResponse.json(
@@ -211,6 +290,7 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
+    const exportMode: ExportMode = mode === 'detailed' ? 'detailed' : 'records';
 
     if (!Array.isArray(records)) {
       return NextResponse.json(
@@ -234,7 +314,12 @@ export async function POST(req: NextRequest) {
     const table = normalizeRecords(records);
 
     if (format === 'csv') {
-      const csv = toCsv(table);
+      const csv = toCsv(table, {
+        mode: exportMode,
+        query: query || '',
+        explanation: explanation || '',
+        cypher: cypher || '',
+      });
       return new Response(csv, {
         status: 200,
         headers: {
@@ -250,6 +335,22 @@ export async function POST(req: NextRequest) {
       });
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, 'Data');
+      if (exportMode === 'detailed') {
+        const detailRows: Array<{ key: string; value: string }> = [
+          { key: 'Mode', value: 'detailed' },
+          { key: 'Generated At', value: new Date().toISOString() },
+          { key: 'Query', value: query || '' },
+          { key: 'Cypher', value: cypher || '' },
+          {
+            key: 'Explanation',
+            value: explanation ? stripMarkdown(explanation) : '',
+          },
+        ];
+        const detailSheet = XLSX.utils.json_to_sheet(detailRows, {
+          header: ['key', 'value'],
+        });
+        XLSX.utils.book_append_sheet(workbook, detailSheet, 'Analysis');
+      }
       const buf = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
       return new Response(new Uint8Array(buf), {
         status: 200,
@@ -261,7 +362,12 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const pdf = toPdf(table);
+    const pdf = toPdf(table, {
+      mode: exportMode,
+      query: query || '',
+      explanation: explanation || '',
+      cypher: cypher || '',
+    });
     return new Response(new Uint8Array(pdf), {
       status: 200,
       headers: {

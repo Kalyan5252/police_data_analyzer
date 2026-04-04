@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
-import { getDriver } from '@/lib/neo4j';
+import { pgQuery, withPgClient } from '@/lib/postgres';
 
 type StoredMessage = {
   id: string;
@@ -10,36 +10,11 @@ type StoredMessage = {
   createdAt: string;
   records?: Record<string, unknown>[];
   cypher?: string;
+  candidateQueries?: string[];
+  queryEvaluation?: string;
   modelResponses?: unknown[];
   error?: boolean;
 };
-
-function toNative(value: unknown): unknown {
-  if (value === null || value === undefined) return value;
-
-  if (
-    typeof value === 'object' &&
-    value !== null &&
-    'toNumber' in value &&
-    typeof (value as { toNumber?: unknown }).toNumber === 'function'
-  ) {
-    return (value as { toNumber: () => number }).toNumber();
-  }
-
-  return value;
-}
-
-function parsePayload(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'string') return {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object'
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    return {};
-  }
-}
 
 export async function GET(
   _req: NextRequest,
@@ -50,55 +25,80 @@ export async function GET(
     return NextResponse.json({ error: 'caseId is required.' }, { status: 400 });
   }
 
-  const driver = getDriver();
-  const session = driver.session();
-
   try {
-    const result = await session.run(
+    const result = await pgQuery<{
+      id: string;
+      role: 'user' | 'system';
+      content: string;
+      timestamp: string;
+      createdAt: string;
+      payload: {
+        records?: Record<string, unknown>[];
+        cypher?: string;
+        candidateQueries?: string[];
+        queryEvaluation?: string;
+        modelResponses?: unknown[];
+        error?: boolean;
+      };
+    }>(
       `
-      MATCH (c:CaseHistory {case_id: $caseId})-[:HAS_MESSAGE]->(m:ChatMessage)
-      RETURN m
-      ORDER BY m.created_at ASC
-      LIMIT 2000
+      SELECT
+        message_id AS id,
+        role,
+        content,
+        timestamp,
+        created_at_iso AS "createdAt",
+        payload
+      FROM chat_messages
+      WHERE case_id = $1
+      ORDER BY created_at ASC
+      LIMIT 3000
       `,
-      { caseId },
+      [caseId],
     );
 
-    const messages: StoredMessage[] = result.records.map((record) => {
-      const node = record.get('m') as {
-        properties: Record<string, unknown>;
+    const messages: StoredMessage[] = result.rows.map((row: {
+      id: string;
+      role: 'user' | 'system';
+      content: string;
+      timestamp: string;
+      createdAt: string;
+      payload: {
+        records?: Record<string, unknown>[];
+        cypher?: string;
+        candidateQueries?: string[];
+        queryEvaluation?: string;
+        modelResponses?: unknown[];
+        error?: boolean;
       };
-      const props = node.properties;
-      const payload = parsePayload(toNative(props.payload));
-
-      return {
-        id: String(toNative(props.message_id) ?? ''),
-        role:
-          String(toNative(props.role)) === 'user'
-            ? 'user'
-            : 'system',
-        content: String(toNative(props.content) ?? ''),
-        timestamp: String(toNative(props.timestamp) ?? ''),
-        createdAt: String(toNative(props.created_at_iso) ?? ''),
-        records: Array.isArray(payload.records)
-          ? (payload.records as Record<string, unknown>[])
+    }) => ({
+      id: row.id,
+      role: row.role === 'user' ? 'user' : 'system',
+      content: row.content,
+      timestamp: row.timestamp,
+      createdAt: row.createdAt,
+      records: Array.isArray(row.payload?.records)
+        ? (row.payload.records as Record<string, unknown>[])
+        : undefined,
+      cypher: typeof row.payload?.cypher === 'string' ? row.payload.cypher : undefined,
+      candidateQueries: Array.isArray(row.payload?.candidateQueries)
+        ? (row.payload.candidateQueries as string[])
+        : undefined,
+      queryEvaluation:
+        typeof row.payload?.queryEvaluation === 'string'
+          ? row.payload.queryEvaluation
           : undefined,
-        cypher:
-          typeof payload.cypher === 'string' ? (payload.cypher as string) : undefined,
-        modelResponses: Array.isArray(payload.modelResponses)
-          ? payload.modelResponses
-          : undefined,
-        error: Boolean(payload.error),
-      };
-    });
+      modelResponses: Array.isArray(row.payload?.modelResponses)
+        ? row.payload.modelResponses
+        : undefined,
+      error: Boolean(row.payload?.error),
+    }));
 
     return NextResponse.json({ success: true, messages }, { status: 200 });
   } catch (err: unknown) {
     const message =
       err instanceof Error ? err.message : 'Failed to fetch case messages.';
     return NextResponse.json({ error: message }, { status: 500 });
-  } finally {
-    await session.close();
   }
 }
 
@@ -130,60 +130,86 @@ export async function POST(
 
   const messageId =
     typeof body.id === 'string' && body.id.trim() ? body.id : randomUUID();
-  const payload = JSON.stringify({
+  const payload = {
     records: Array.isArray(body.records) ? body.records : undefined,
     cypher: typeof body.cypher === 'string' ? body.cypher : undefined,
+    candidateQueries: Array.isArray(body.candidateQueries)
+      ? body.candidateQueries.filter((v: unknown) => typeof v === 'string')
+      : undefined,
+    queryEvaluation:
+      typeof body.queryEvaluation === 'string' ? body.queryEvaluation : undefined,
     modelResponses: Array.isArray(body.modelResponses)
       ? body.modelResponses
       : undefined,
     error: Boolean(body.error),
-  });
-
-  const driver = getDriver();
-  const session = driver.session();
+  };
 
   try {
     const maybeTitle =
       role === 'user' ? content.replace(/\s+/g, ' ').trim().slice(0, 72) : '';
 
-    await session.run(
-      `
-      MATCH (c:CaseHistory {case_id: $caseId})
-      CREATE (m:ChatMessage {
-        message_id: $messageId,
-        role: $role,
-        content: $content,
-        timestamp: $timestamp,
-        created_at_iso: $createdAt,
-        created_at: datetime($createdAt),
-        payload: $payload
-      })
-      CREATE (c)-[:HAS_MESSAGE]->(m)
-      SET c.updated_at = datetime()
-      SET c.title = CASE
-        WHEN c.title STARTS WITH 'Case ' AND $maybeTitle <> '' THEN $maybeTitle
-        ELSE c.title
-      END
-      RETURN m.message_id AS messageId
-      `,
-      {
-        caseId,
-        messageId,
-        role,
-        content,
-        timestamp,
-        createdAt,
-        payload,
-        maybeTitle,
-      },
-    );
+    const inserted = await withPgClient(async (client) => {
+      await client.query('BEGIN');
+      try {
+        const exists = await client.query(
+          'SELECT case_id FROM case_histories WHERE case_id = $1 LIMIT 1',
+          [caseId],
+        );
+        if ((exists.rowCount ?? 0) === 0) {
+          await client.query('ROLLBACK');
+          return { notFound: true } as const;
+        }
+
+        await client.query(
+          `
+          INSERT INTO chat_messages
+            (message_id, case_id, role, content, timestamp, created_at_iso, created_at, payload)
+          VALUES
+            ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::jsonb)
+          ON CONFLICT (message_id) DO NOTHING
+          `,
+          [
+            messageId,
+            caseId,
+            role,
+            content,
+            timestamp,
+            createdAt,
+            createdAt,
+            JSON.stringify(payload),
+          ],
+        );
+
+        await client.query(
+          `
+          UPDATE case_histories
+          SET
+            updated_at = NOW(),
+            title = CASE
+              WHEN title LIKE 'Case %' AND $2 <> '' THEN $2
+              ELSE title
+            END
+          WHERE case_id = $1
+          `,
+          [caseId, maybeTitle],
+        );
+
+        await client.query('COMMIT');
+        return { notFound: false } as const;
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      }
+    });
+
+    if (inserted.notFound) {
+      return NextResponse.json({ error: 'Case not found.' }, { status: 404 });
+    }
 
     return NextResponse.json({ success: true, messageId }, { status: 201 });
   } catch (err: unknown) {
     const message =
       err instanceof Error ? err.message : 'Failed to persist chat message.';
     return NextResponse.json({ error: message }, { status: 500 });
-  } finally {
-    await session.close();
   }
 }

@@ -28,6 +28,8 @@ export type InvestigationTurnResult = {
   cypher: string;
   records: Record<string, unknown>[];
   modelResponses: LLMResponse[];
+  candidateQueries?: string[];
+  queryEvaluation?: string;
 };
 
 type RunOptions = {
@@ -37,13 +39,26 @@ type RunOptions = {
 
 const MAX_HOPS = 4;
 const PATH_RETURN_LIMIT = 10;
+const MAX_CANDIDATE_QUERIES = 3;
+
+type QueryCandidate = {
+  name: string;
+  strategy: 'shortest_path' | 'all_paths' | 'intermediate_path' | 'llm_generated';
+  cypher: string;
+};
+
+type QueryExecution = {
+  candidate: QueryCandidate;
+  records: Record<string, unknown>[];
+  error?: string;
+};
 
 function buildHistoryContext(history: ConversationTurn[]): string {
   if (!history.length) return '';
-  const recent = history.slice(-8);
+  const recent = history.slice(-24);
   const context = recent
     .map((turn, idx) => {
-      const clean = turn.content.replace(/\s+/g, ' ').trim().slice(0, 320);
+      const clean = turn.content.replace(/\s+/g, ' ').trim().slice(0, 700);
       return `${idx + 1}. ${turn.role.toUpperCase()}: ${clean}`;
     })
     .join('\n');
@@ -72,6 +87,10 @@ function normalizeCypherForSafety(cypher: string): string {
     });
 
   return query;
+}
+
+function escapeCypherLiteral(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
 function extractMsisdn(userQuery: string): string | null {
@@ -132,11 +151,322 @@ function buildActivityTypeHint(userQuery: string): string {
   return '';
 }
 
-function buildPhoneLocationPathQuery(msisdn: string, cellId: string): string {
-  return `MATCH (a:PhoneNumber {msisdn: '${msisdn}'}), (b:Location {cell_id: '${cellId}'})
+type Anchor = {
+  label: string;
+  field: string;
+  value: string;
+};
+
+function buildInvestigationHeuristicsHint(userQuery: string): string {
+  const q = userQuery.toLowerCase();
+  const hints: string[] = [];
+
+  if (/most|top|frequent|frequency|repeated|highest/.test(q)) {
+    hints.push(
+      "- Use aggregation logic (count/distinct count + ORDER BY DESC + LIMIT) for 'most/top/frequent' intents.",
+    );
+  }
+  if (/odd hour|midnight|night|late|before|after|timeline|time window/.test(q)) {
+    hints.push(
+      '- Apply temporal filtering/windowing and compare activity around incident windows.',
+    );
+  }
+  if (/tower|cell|location|movement|trajectory|hopping|roaming/.test(q)) {
+    hints.push(
+      '- Use tower/cell sequence analysis and bounded traversal to infer movement patterns.',
+    );
+  }
+  if (/connect|relationship|linked|between|path|network/.test(q)) {
+    hints.push(
+      '- For relationship-heavy queries, attempt direct, intermediate, then bounded multi-hop traversal [*1..4].',
+    );
+  }
+
+  return hints.length
+    ? `Investigation reasoning hints:\n${hints.join('\n')}`
+    : '';
+}
+
+function extractAnchors(userQuery: string): Anchor[] {
+  const anchors: Anchor[] = [];
+  const q = userQuery.toLowerCase();
+
+  const msisdn = extractMsisdn(userQuery);
+  if (msisdn) anchors.push({ label: 'PhoneNumber', field: 'msisdn', value: msisdn });
+
+  const cellId = extractCellId(userQuery);
+  if (cellId) anchors.push({ label: 'Location', field: 'cell_id', value: cellId });
+
+  const ip = userQuery.match(
+    /\b((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})\b/,
+  );
+  if (ip) anchors.push({ label: 'IPAddress', field: 'ip', value: ip[1] });
+
+  const imeiMatch = userQuery.match(/\b\d{14,17}\b/);
+  if (imeiMatch && /imei|device/.test(q)) {
+    anchors.push({ label: 'Device', field: 'imei', value: imeiMatch[0] });
+  }
+
+  const accMatch = userQuery.match(
+    /\b(?:account(?:\s*number)?|bank(?:\s*account)?)\b[^0-9A-Za-z]*([0-9A-Za-z_-]{6,})/i,
+  );
+  if (accMatch) {
+    anchors.push({
+      label: 'BankAccount',
+      field: 'account_number',
+      value: accMatch[1],
+    });
+  }
+
+  const sessionMatch = userQuery.match(/\bsession(?:\s*id)?\b[^0-9A-Za-z]*([0-9A-Za-z_-]{4,})/i);
+  if (sessionMatch) {
+    anchors.push({
+      label: 'InternetSession',
+      field: 'session_id',
+      value: sessionMatch[1],
+    });
+  }
+
+  const eventMatch = userQuery.match(/\bevent(?:\s*id)?\b[^0-9A-Za-z]*([0-9A-Za-z_-]{4,})/i);
+  if (eventMatch) {
+    anchors.push({
+      label: 'CommunicationEvent',
+      field: 'event_id',
+      value: eventMatch[1],
+    });
+  }
+
+  const seen = new Set<string>();
+  return anchors.filter((a) => {
+    const key = `${a.label}:${a.field}:${a.value}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function detectGenericComplexRelationshipIntent(
+  userQuery: string,
+): { a: Anchor; b: Anchor } | null {
+  const q = userQuery.toLowerCase();
+  const asksRelationship = /connect|relationship|linked|between|associated|path|network|involved/.test(
+    q,
+  );
+  if (!asksRelationship) return null;
+
+  const anchors = extractAnchors(userQuery);
+  if (anchors.length < 2) return null;
+  return { a: anchors[0], b: anchors[1] };
+}
+
+function detectPhoneToImeiIntent(userQuery: string): { msisdn: string } | null {
+  const q = userQuery.toLowerCase();
+  const asksImei =
+    q.includes('imei') ||
+    q.includes('device id') ||
+    q.includes('device identifier');
+  if (!asksImei) return null;
+
+  const msisdn = extractMsisdn(userQuery);
+  if (!msisdn) return null;
+
+  return { msisdn };
+}
+
+function buildPhoneToImeiQuery(msisdn: string): string {
+  return `MATCH (p:PhoneNumber {msisdn: '${escapeCypherLiteral(msisdn)}'})
+OPTIONAL MATCH (p)-[:USED_DEVICE]-(dDirect:Device)
+OPTIONAL MATCH (p)-[:SEEN_AT]-(pe:PresenceEvent)-[*1..2]-(dViaPresence:Device)
+OPTIONAL MATCH (p)-[*1..4]-(dHop:Device)
+WITH [d IN (collect(DISTINCT dDirect) + collect(DISTINCT dViaPresence) + collect(DISTINCT dHop)) WHERE d IS NOT NULL] AS devices
+UNWIND devices AS d
+RETURN DISTINCT d.imei AS imei
+LIMIT 20`;
+}
+
+function buildPhoneLocationPathCandidates(
+  msisdn: string,
+  cellId: string,
+): QueryCandidate[] {
+  const safeMsisdn = escapeCypherLiteral(msisdn);
+  const safeCell = escapeCypherLiteral(cellId);
+  return [
+    {
+      name: 'Shortest bounded path',
+      strategy: 'shortest_path',
+      cypher: `MATCH (a:PhoneNumber {msisdn: '${safeMsisdn}'}), (b:Location {cell_id: '${safeCell}'})
 MATCH p = shortestPath((a)-[*1..${MAX_HOPS}]-(b))
 RETURN p
-LIMIT ${PATH_RETURN_LIMIT}`;
+LIMIT ${PATH_RETURN_LIMIT}`,
+    },
+    {
+      name: 'All bounded paths',
+      strategy: 'all_paths',
+      cypher: `MATCH (a:PhoneNumber {msisdn: '${safeMsisdn}'}), (b:Location {cell_id: '${safeCell}'})
+MATCH p = (a)-[*1..${MAX_HOPS}]-(b)
+RETURN p
+ORDER BY length(p) ASC
+LIMIT ${PATH_RETURN_LIMIT}`,
+    },
+    {
+      name: 'Presence-event bridge path',
+      strategy: 'intermediate_path',
+      cypher: `MATCH (a:PhoneNumber {msisdn: '${safeMsisdn}'})-[:SEEN_AT]-(pe:PresenceEvent)
+MATCH (b:Location {cell_id: '${safeCell}'})
+MATCH p = (a)-[:SEEN_AT]-(pe)-[*1..2]-(b)
+RETURN p, pe
+LIMIT ${PATH_RETURN_LIMIT}`,
+    },
+  ];
+}
+
+function buildGenericRelationshipCandidates(a: Anchor, b: Anchor): QueryCandidate[] {
+  const safeA = escapeCypherLiteral(a.value);
+  const safeB = escapeCypherLiteral(b.value);
+  return [
+    {
+      name: 'Shortest bounded path',
+      strategy: 'shortest_path',
+      cypher: `MATCH (a:${a.label} {${a.field}: '${safeA}'}), (b:${b.label} {${b.field}: '${safeB}'})
+MATCH p = shortestPath((a)-[*1..${MAX_HOPS}]-(b))
+RETURN p
+LIMIT ${PATH_RETURN_LIMIT}`,
+    },
+    {
+      name: 'All bounded paths',
+      strategy: 'all_paths',
+      cypher: `MATCH (a:${a.label} {${a.field}: '${safeA}'}), (b:${b.label} {${b.field}: '${safeB}'})
+MATCH p = (a)-[*1..${MAX_HOPS}]-(b)
+RETURN p
+ORDER BY length(p) ASC
+LIMIT ${PATH_RETURN_LIMIT}`,
+    },
+    {
+      name: 'Relationship evidence summary',
+      strategy: 'intermediate_path',
+      cypher: `MATCH (a:${a.label} {${a.field}: '${safeA}'}), (b:${b.label} {${b.field}: '${safeB}'})
+MATCH p = (a)-[*1..${MAX_HOPS}]-(b)
+UNWIND relationships(p) AS rel
+RETURN type(rel) AS relationship_type, count(*) AS occurrences
+ORDER BY occurrences DESC
+LIMIT 20`,
+    },
+  ];
+}
+
+function detectPathLikeEvidence(record: Record<string, unknown>): boolean {
+  return Object.values(record).some((value) => {
+    if (!value || typeof value !== 'object') return false;
+    const v = value as Record<string, unknown>;
+    return (
+      Object.prototype.hasOwnProperty.call(v, 'segments') ||
+      Object.prototype.hasOwnProperty.call(v, 'start') ||
+      Object.prototype.hasOwnProperty.call(v, 'end')
+    );
+  });
+}
+
+function heuristicScoreExecution(
+  execution: QueryExecution,
+  asksRelationship: boolean,
+): number {
+  if (execution.error) return 0;
+  let score = 0;
+  const count = execution.records.length;
+  score += Math.min(count, 20);
+  if (count > 0) score += 8;
+  if (asksRelationship && execution.records.some(detectPathLikeEvidence)) score += 12;
+  if (execution.candidate.strategy === 'all_paths') score += 4;
+  if (execution.candidate.strategy === 'intermediate_path') score += 3;
+  return score;
+}
+
+function extractJsonObject(text: string): Record<string, unknown> | null {
+  const trimmed = text.trim();
+  const start = trimmed.indexOf('{');
+  const end = trimmed.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  const candidate = trimmed.slice(start, end + 1);
+  try {
+    return JSON.parse(candidate) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+async function evaluateQueryExecutions(
+  userQuery: string,
+  executions: QueryExecution[],
+  historyContext: string,
+): Promise<{ best: QueryExecution; summary: string }> {
+  const successful = executions.filter((e) => !e.error);
+  if (successful.length === 0) {
+    throw new Error('All query strategies failed.');
+  }
+  if (successful.length === 1) {
+    return { best: successful[0], summary: 'Single strategy executed successfully.' };
+  }
+
+  const asksRelationship = /connect|relationship|linked|between|associated|path|network|involved|directly|indirectly/.test(
+    userQuery.toLowerCase(),
+  );
+  const compact = successful.map((entry, index) => ({
+    index,
+    name: entry.candidate.name,
+    strategy: entry.candidate.strategy,
+    cypher: entry.candidate.cypher,
+    recordCount: entry.records.length,
+    hasPathEvidence: entry.records.some(detectPathLikeEvidence),
+    preview:
+      entry.records.length === 0
+        ? []
+        : JSON.stringify(entry.records.slice(0, 2), null, 2).slice(0, 1200),
+  }));
+
+  try {
+    const evalResp = await callLLM('openai', 'gpt-4o-mini', [
+      {
+        role: 'system',
+        content:
+          'You are an evidence evaluator agent for graph investigations. Pick the best query result set for final analysis with priority on factual path evidence, relationship coverage, and investigative usefulness. Return strict JSON: {"selectedIndex": number, "reason": string}.',
+      },
+      {
+        role: 'user',
+        content: `${historyContext}User question:\n${userQuery}\n\nCandidate query outputs:\n${JSON.stringify(
+          compact,
+          null,
+          2,
+        )}\n\nSelect one candidate index.`,
+      },
+    ]);
+    const parsed = extractJsonObject(evalResp.content);
+    const selectedIndexRaw = parsed?.selectedIndex;
+    const selectedIndex =
+      typeof selectedIndexRaw === 'number' ? Math.trunc(selectedIndexRaw) : -1;
+    const reason = typeof parsed?.reason === 'string' ? parsed.reason.trim() : '';
+    if (selectedIndex >= 0 && selectedIndex < successful.length) {
+      return {
+        best: successful[selectedIndex],
+        summary: reason || 'Evaluator selected the most relevant evidence set.',
+      };
+    }
+  } catch {
+    // fall through to heuristic selection
+  }
+
+  let best = successful[0];
+  let bestScore = heuristicScoreExecution(best, asksRelationship);
+  for (const execution of successful.slice(1)) {
+    const score = heuristicScoreExecution(execution, asksRelationship);
+    if (score > bestScore) {
+      best = execution;
+      bestScore = score;
+    }
+  }
+  return {
+    best,
+    summary: 'Heuristic evaluator selected the strongest evidence set.',
+  };
 }
 
 function isSmallTalk(message: string): boolean {
@@ -179,9 +509,10 @@ async function generateCypher(
     content: GRAPH_SCHEMA_DESCRIPTION,
   };
   const activityHint = buildActivityTypeHint(userQuery);
+  const intelligenceHint = buildInvestigationHeuristicsHint(userQuery);
   const user: LLMMessage = {
     role: 'user',
-    content: `${historyContext}User natural language question:\n${userQuery}\n\nCRITICAL PRIMARY-IDENTIFIER RULES (must follow):\n- \"person\" ALWAYS means PhoneNumber.\n- PhoneNumber lookups must use msisdn.\n- BankAccount lookups must use account_number.\n- CommunicationEvent and PresenceEvent lookups must use event_id.\n- Device lookups must use imei.\n- FinancialTransaction lookups must use txn_id.\n- InternetSession lookups must use session_id.\n- IPAddress lookups must use ip.\n- Location lookups must use cell_id.\n- Never use generic node property id for business lookup.\n- For \"called the most\" style questions, aggregate on CommunicationEvent involvement and return highest count counterpart.\n${activityHint ? `\n${activityHint}\n` : ''}\nGenerate an appropriate Cypher query over the described schema.`,
+    content: `${historyContext}User natural language question:\n${userQuery}\n\nCRITICAL PRIMARY-IDENTIFIER RULES (must follow):\n- \"person\" ALWAYS means PhoneNumber.\n- PhoneNumber lookups must use msisdn.\n- BankAccount lookups must use account_number.\n- CommunicationEvent and PresenceEvent lookups must use event_id.\n- Device lookups must use imei.\n- FinancialTransaction lookups must use txn_id.\n- InternetSession lookups must use session_id.\n- IPAddress lookups must use ip.\n- Location lookups must use cell_id.\n- Never use generic node property id for business lookup.\n- For \"called the most\" style questions, aggregate on CommunicationEvent involvement and return highest count counterpart.\n${activityHint ? `\n${activityHint}\n` : ''}${intelligenceHint ? `\n${intelligenceHint}\n` : ''}\nGenerate an appropriate Cypher query over the described schema.`,
   };
 
   // Use OpenAI mini model as primary query generator
@@ -214,6 +545,7 @@ async function synthesizeFinalAnswer(
   records: Record<string, unknown>[],
   modelResponses: LLMResponse[],
   historyContext: string,
+  queryEvaluation?: string,
 ): Promise<string> {
   const system: LLMMessage = {
     role: 'system',
@@ -235,7 +567,7 @@ async function synthesizeFinalAnswer(
 
   const user: LLMMessage = {
     role: 'user',
-    content: `${historyContext}User question:\n${userQuery}\n\nCypher executed:\n${cypher}\n\nRaw records (JSON slice):\n${recordsJson}\n\nModel opinions:\n${opinionsBlock}\n\nNow produce the final answer for the officer, following the rules.`,
+    content: `${historyContext}User question:\n${userQuery}\n\nCypher executed:\n${cypher}\n\nQuery-evaluation note:\n${queryEvaluation || 'N/A'}\n\nRaw records (JSON slice):\n${recordsJson}\n\nModel opinions:\n${opinionsBlock}\n\nNow produce the final answer for the officer, following the rules.`,
   };
 
   // Use OpenAI mini model for final synthesis
@@ -291,64 +623,113 @@ export async function runInvestigationTurn(
     message: 'Planning graph query from your natural language request.',
   });
   const pathIntent = detectPhoneToLocationPathIntent(userQuery);
-  let cypher = '';
+  const imeiIntent = detectPhoneToImeiIntent(userQuery);
+  const genericIntent = detectGenericComplexRelationshipIntent(userQuery);
+  let candidateQueries: QueryCandidate[] = [];
   if (pathIntent) {
-    cypher = buildPhoneLocationPathQuery(pathIntent.msisdn, pathIntent.cellId);
+    candidateQueries = buildPhoneLocationPathCandidates(
+      pathIntent.msisdn,
+      pathIntent.cellId,
+    );
     await emit({
       stage: 'planning_query',
-      message: `Detected path-traversal intent between ${pathIntent.msisdn} and cell ${pathIntent.cellId}. Using bounded shortest-path traversal.`,
+      message: `Detected path-traversal intent between ${pathIntent.msisdn} and cell ${pathIntent.cellId}. Building multiple bounded traversal strategies.`,
+    });
+  } else if (imeiIntent) {
+    candidateQueries = [
+      {
+        name: 'Phone to IMEI lookup',
+        strategy: 'intermediate_path',
+        cypher: buildPhoneToImeiQuery(imeiIntent.msisdn),
+      },
+    ];
+    await emit({
+      stage: 'planning_query',
+      message: `Detected IMEI lookup intent for phone ${imeiIntent.msisdn}. Using bounded indirect traversal to Device nodes.`,
+    });
+  } else if (genericIntent) {
+    candidateQueries = buildGenericRelationshipCandidates(
+      genericIntent.a,
+      genericIntent.b,
+    );
+    await emit({
+      stage: 'planning_query',
+      message: `Detected complex relationship intent between ${genericIntent.a.label}.${genericIntent.a.field} and ${genericIntent.b.label}.${genericIntent.b.field}. Building shortest-path and multi-path strategies.`,
     });
   } else {
-    cypher = await generateCypher(userQuery, historyContext);
+    candidateQueries = [
+      {
+        name: 'Generated Cypher',
+        strategy: 'llm_generated',
+        cypher: await generateCypher(userQuery, historyContext),
+      },
+    ];
   }
+  candidateQueries = candidateQueries.slice(0, MAX_CANDIDATE_QUERIES);
   await emit({
     stage: 'query_ready',
-    message: 'Cypher query prepared.',
-    meta: { cypher },
+    message: `Prepared ${candidateQueries.length} query strategy(s).`,
+    meta: {
+      cypher: candidateQueries[0]?.cypher || '',
+      candidateQueries: candidateQueries.map((q) => ({
+        name: q.name,
+        strategy: q.strategy,
+        cypher: q.cypher,
+      })),
+    },
   });
 
   // 2) Execute Neo4j query
   await emit({
     stage: 'fetching_data',
-    message: 'Executing Cypher and fetching records from Neo4j.',
+    message: `Executing ${candidateQueries.length} strategy query(ies) against Neo4j.`,
   });
-  let records: Record<string, unknown>[] = [];
-  try {
-    records = await runCypher(cypher);
-  } catch (err) {
-    // Fallback path traversal only for connectivity/path questions.
-    const fallback = pathIntent ?? detectPhoneToLocationPathIntent(userQuery);
-    if (!fallback) throw err;
-    cypher = buildPhoneLocationPathQuery(fallback.msisdn, fallback.cellId);
+  const executions: QueryExecution[] = [];
+  for (let i = 0; i < candidateQueries.length; i++) {
+    const candidate = candidateQueries[i];
     await emit({
       stage: 'fetching_data',
-      message:
-        'Primary query failed. Retrying with bounded shortest-path traversal fallback.',
-      meta: { fallbackCypher: cypher },
+      message: `Running strategy ${i + 1}/${candidateQueries.length}: ${candidate.name}.`,
+      meta: { cypher: candidate.cypher, strategy: candidate.strategy },
     });
-    records = await runCypher(cypher);
+    try {
+      const resultRows = await runCypher(candidate.cypher);
+      executions.push({ candidate, records: resultRows });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      executions.push({ candidate, records: [], error: message });
+      await emit({
+        stage: 'fetching_data',
+        message: `Strategy failed (${candidate.name}): ${message}`,
+      });
+    }
   }
-
-  // If path question returned no rows, attempt a second bounded variant using all paths.
-  if (records.length === 0 && pathIntent) {
-    const allPathsCypher = `MATCH p = (a:PhoneNumber {msisdn: '${pathIntent.msisdn}'})-[*1..${MAX_HOPS}]-(b:Location {cell_id: '${pathIntent.cellId}'})
-RETURN p
-LIMIT ${PATH_RETURN_LIMIT}`;
-    await emit({
-      stage: 'fetching_data',
-      message:
-        'No shortest-path result found. Running bounded all-path traversal as fallback.',
-      meta: { fallbackCypher: allPathsCypher },
-    });
-    cypher = allPathsCypher;
-    records = await runCypher(cypher);
+  const nonFailed = executions.filter((e) => !e.error);
+  if (nonFailed.length === 0) {
+    throw new Error(
+      executions.map((e) => `${e.candidate.name}: ${e.error || 'Unknown error'}`).join(' | '),
+    );
   }
   await emit({
+    stage: 'fetching_data',
+    message:
+      'Evaluating query strategy outputs to select the strongest investigation evidence.',
+  });
+  const evaluation = await evaluateQueryExecutions(
+    userQuery,
+    executions,
+    historyContext,
+  );
+  const cypher = evaluation.best.candidate.cypher;
+  const records = evaluation.best.records;
+  const queryEvaluation = `Selected strategy: ${evaluation.best.candidate.name} (${evaluation.best.candidate.strategy}). ${evaluation.summary}`;
+  await emit({
     stage: 'data_fetched',
-    message: `Fetched ${records.length} record(s) from the graph.`,
+    message: `Selected best strategy and fetched ${records.length} record(s) from the graph.`,
     meta: {
       recordCount: records.length,
       preview: records.slice(0, 3),
+      queryEvaluation,
     },
   });
 
@@ -416,6 +797,7 @@ LIMIT ${PATH_RETURN_LIMIT}`;
     records,
     modelResponses,
     historyContext,
+    queryEvaluation,
   );
   await emit({
     stage: 'completed',
@@ -427,5 +809,7 @@ LIMIT ${PATH_RETURN_LIMIT}`;
     cypher,
     records,
     modelResponses,
+    candidateQueries: candidateQueries.map((q) => q.cypher),
+    queryEvaluation,
   };
 }
