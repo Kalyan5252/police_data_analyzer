@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDriver } from '@/lib/neo4j';
+import { normalizeTemporalFields } from '@/lib/timeNormalization';
 
 export async function POST(req: NextRequest) {
   try {
@@ -25,7 +26,7 @@ export async function POST(req: NextRequest) {
           const value = record.get(key);
           obj[key] = serialize(value);
         });
-        return obj;
+        return normalizeTemporalFields(obj);
       });
 
       return NextResponse.json({

@@ -1,6 +1,7 @@
 import { getDriver } from '@/lib/neo4j';
 import { GRAPH_SCHEMA_DESCRIPTION } from '@/lib/schemaContext';
 import { callLLM, LLMMessage, LLMResponse } from '@/lib/llmClients';
+import { normalizeTemporalFields } from '@/lib/timeNormalization';
 
 export type ConversationTurn = {
   role: 'user' | 'system';
@@ -110,6 +111,27 @@ function detectPhoneToLocationPathIntent(
   return { msisdn, cellId };
 }
 
+function buildActivityTypeHint(userQuery: string): string {
+  const q = userQuery.toLowerCase();
+  if (/call activity|call details|calls|called/.test(q)) {
+    return `Activity intent mapping:
+- Call activity => CommunicationEvent.type IN ['CALL-IN', 'CALL-OUT']`;
+  }
+
+  if (/message activity|sms|text message|messages/.test(q)) {
+    return `Activity intent mapping:
+- Message activity => CommunicationEvent.type IN ['SMS-IN', 'SMS-OUT', 'DSM-SMS', 'SMS-OUT ROAMING']
+- Also allow SMS variants via prefix logic (e.g. ce.type STARTS WITH 'SMS-') when needed`;
+  }
+
+  if (/video activity|video call|vdo/.test(q)) {
+    return `Activity intent mapping:
+- Video activity => CommunicationEvent.type IN ['VDO-IN', 'VDO-OUT']`;
+  }
+
+  return '';
+}
+
 function buildPhoneLocationPathQuery(msisdn: string, cellId: string): string {
   return `MATCH (a:PhoneNumber {msisdn: '${msisdn}'}), (b:Location {cell_id: '${cellId}'})
 MATCH p = shortestPath((a)-[*1..${MAX_HOPS}]-(b))
@@ -156,9 +178,10 @@ async function generateCypher(
     role: 'system',
     content: GRAPH_SCHEMA_DESCRIPTION,
   };
+  const activityHint = buildActivityTypeHint(userQuery);
   const user: LLMMessage = {
     role: 'user',
-    content: `${historyContext}User natural language question:\n${userQuery}\n\nGenerate an appropriate Cypher query over the described schema.`,
+    content: `${historyContext}User natural language question:\n${userQuery}\n\nCRITICAL PRIMARY-IDENTIFIER RULES (must follow):\n- \"person\" ALWAYS means PhoneNumber.\n- PhoneNumber lookups must use msisdn.\n- BankAccount lookups must use account_number.\n- CommunicationEvent and PresenceEvent lookups must use event_id.\n- Device lookups must use imei.\n- FinancialTransaction lookups must use txn_id.\n- InternetSession lookups must use session_id.\n- IPAddress lookups must use ip.\n- Location lookups must use cell_id.\n- Never use generic node property id for business lookup.\n- For \"called the most\" style questions, aggregate on CommunicationEvent involvement and return highest count counterpart.\n${activityHint ? `\n${activityHint}\n` : ''}\nGenerate an appropriate Cypher query over the described schema.`,
   };
 
   // Use OpenAI mini model as primary query generator
@@ -177,7 +200,7 @@ async function runCypher(cypher: string): Promise<Record<string, unknown>[]> {
         const field = String(key);
         obj[field] = record.get(field);
       });
-      return obj;
+      return normalizeTemporalFields(obj);
     });
     return records;
   } finally {

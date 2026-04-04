@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   Search,
   Shield,
@@ -37,6 +38,7 @@ type Message = {
   role: 'user' | 'system';
   content: string;
   timestamp: string;
+  createdAt?: string;
   records?: Record<string, unknown>[];
   cypher?: string;
   modelResponses?: LLMOpinion[];
@@ -95,6 +97,10 @@ function getTimestamp() {
   });
 }
 
+function getMessageCreatedAt() {
+  return new Date().toISOString();
+}
+
 function getWelcomeMessage(): Message {
   return {
     id: '1',
@@ -102,6 +108,7 @@ function getWelcomeMessage(): Message {
     content:
       'System Initialized. Neo4j graph database connected securely. Enter a Cypher query or a natural language investigation query.',
     timestamp: getTimestamp(),
+    createdAt: getMessageCreatedAt(),
   };
 }
 
@@ -342,19 +349,112 @@ async function consumeSSE(
   }
 }
 
+type CasePayload = {
+  caseId: string;
+  title: string;
+};
+
 export default function AnalyzePage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const caseParam = searchParams.get('case');
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isCaseLoading, setIsCaseLoading] = useState(false);
+  const [activeCaseId, setActiveCaseId] = useState<string | null>(null);
   const [operationState, setOperationState] = useState<OperationState | null>(
     null,
   );
 
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  const createCaseIfMissing = async (): Promise<CasePayload> => {
+    const res = await fetch('/api/cases', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success || !data.case?.caseId) {
+      throw new Error(data.error || 'Failed to create case.');
+    }
+    return {
+      caseId: String(data.case.caseId),
+      title: String(data.case.title ?? ''),
+    };
+  };
+
+  const loadCaseMessages = async (caseId: string) => {
+    const res = await fetch(`/api/cases/${encodeURIComponent(caseId)}/messages`, {
+      cache: 'no-store',
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success || !Array.isArray(data.messages)) {
+      throw new Error(data.error || 'Failed to load case messages.');
+    }
+
+    const loaded = (data.messages as Message[]).map((msg) => ({
+      ...msg,
+      createdAt: msg.createdAt || getMessageCreatedAt(),
+    }));
+
+    if (loaded.length === 0) {
+      setMessages([getWelcomeMessage()]);
+    } else {
+      setMessages(loaded);
+    }
+  };
+
+  const persistMessage = async (caseId: string, message: Message) => {
+    await fetch(`/api/cases/${encodeURIComponent(caseId)}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        timestamp: message.timestamp,
+        createdAt: message.createdAt || getMessageCreatedAt(),
+        records: message.records,
+        cypher: message.cypher,
+        modelResponses: message.modelResponses,
+        error: Boolean(message.error),
+      }),
+    });
+  };
+
   useEffect(() => {
-    setMessages([getWelcomeMessage()]);
-  }, []);
+    let ignore = false;
+    const boot = async () => {
+      setIsCaseLoading(true);
+      try {
+        let selectedCaseId = caseParam;
+        if (!selectedCaseId) {
+          const created = await createCaseIfMissing();
+          selectedCaseId = created.caseId;
+          router.replace(`/analyze?case=${encodeURIComponent(created.caseId)}`);
+        }
+        if (!selectedCaseId || ignore) return;
+        setActiveCaseId(selectedCaseId);
+        await loadCaseMessages(selectedCaseId);
+      } catch {
+        if (!ignore) {
+          setMessages([getWelcomeMessage()]);
+        }
+      } finally {
+        if (!ignore) {
+          setIsCaseLoading(false);
+        }
+      }
+    };
+    void boot();
+
+    return () => {
+      ignore = true;
+    };
+  }, [caseParam, router]);
 
   // Auto-scroll to bottom on new messages or operation updates
   useEffect(() => {
@@ -391,15 +491,23 @@ export default function AnalyzePage() {
     const link = document.createElement('a');
     link.href = url;
     link.download = fileName;
+    link.rel = 'noopener';
+
+    // Guard cleanup to avoid DOM removeChild race issues in strict/concurrent renders.
     document.body.appendChild(link);
     link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+
+    setTimeout(() => {
+      if (document.body.contains(link)) {
+        document.body.removeChild(link);
+      }
+      URL.revokeObjectURL(url);
+    }, 0);
   };
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isProcessing) return;
+    if (!input.trim() || isProcessing || !activeCaseId) return;
 
     const userQuery = input.trim();
     const requestedExportFormat = detectRequestedExportFormat(userQuery);
@@ -408,6 +516,7 @@ export default function AnalyzePage() {
       role: 'user',
       content: userQuery,
       timestamp: getTimestamp(),
+      createdAt: getMessageCreatedAt(),
     };
 
     const historyForContext = messages
@@ -418,6 +527,9 @@ export default function AnalyzePage() {
     setMessages((prev) => [...prev, newUserMsg]);
     setInput('');
     setIsProcessing(true);
+    void persistMessage(activeCaseId, newUserMsg).then(() =>
+      window.dispatchEvent(new Event('case-history-updated')),
+    );
 
     try {
       const isLikelyCypher = /^\s*(match|merge|create|with|return)\b/i.test(
@@ -466,6 +578,7 @@ export default function AnalyzePage() {
             role: 'system',
             content,
             timestamp: getTimestamp(),
+            createdAt: getMessageCreatedAt(),
             records: data.records,
             exportRequest:
               requestedExportFormat && data.records?.length
@@ -477,6 +590,9 @@ export default function AnalyzePage() {
                 : undefined,
           };
           setMessages((prev) => [...prev, newSystemMsg]);
+          void persistMessage(activeCaseId, newSystemMsg).then(() =>
+            window.dispatchEvent(new Event('case-history-updated')),
+          );
         } else {
           throw new Error(data.error || 'Unknown error from server.');
         }
@@ -538,6 +654,7 @@ export default function AnalyzePage() {
           role: 'system',
           content: payload.finalAnswer,
           timestamp: getTimestamp(),
+          createdAt: getMessageCreatedAt(),
           records: payload.records,
           cypher: payload.cypher,
           modelResponses: payload.modelResponses,
@@ -552,6 +669,9 @@ export default function AnalyzePage() {
         };
 
         setMessages((prev) => [...prev, newSystemMsg]);
+        void persistMessage(activeCaseId, newSystemMsg).then(() =>
+          window.dispatchEvent(new Event('case-history-updated')),
+        );
       }
     } catch (err) {
       const errorMsg: Message = {
@@ -559,9 +679,13 @@ export default function AnalyzePage() {
         role: 'system',
         content: `Network error: Could not reach the query service. ${err instanceof Error ? err.message : ''}`,
         timestamp: getTimestamp(),
+        createdAt: getMessageCreatedAt(),
         error: true,
       };
       setMessages((prev) => [...prev, errorMsg]);
+      void persistMessage(activeCaseId, errorMsg).then(() =>
+        window.dispatchEvent(new Event('case-history-updated')),
+      );
     } finally {
       setIsProcessing(false);
       setTimeout(() => setOperationState(null), 1200);
@@ -586,6 +710,14 @@ export default function AnalyzePage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          {activeCaseId && (
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-white text-brand-dark rounded-md border border-brand-light/35">
+              <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                Case
+              </span>
+              <span className="text-xs font-semibold">{activeCaseId.slice(0, 8)}</span>
+            </div>
+          )}
           <div className="flex items-center gap-2 px-3 py-1.5 bg-brand-light/10 text-brand-dark rounded-md border border-brand-light/30">
             <Database className="w-4 h-4" />
             <span className="text-xs font-semibold">Neo4j Connected</span>
@@ -610,6 +742,15 @@ export default function AnalyzePage() {
 
         {/* Foreground Chat Content */}
         <div className="relative flex flex-col gap-6">
+          {isCaseLoading && (
+            <div className="flex w-full justify-start">
+              <div className="max-w-[85%] rounded-xl border border-brand-light/30 bg-white px-4 py-3 text-sm text-slate-600 shadow-sm flex items-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin text-brand-dark" />
+                Loading case history...
+              </div>
+            </div>
+          )}
+
           {messages.map((msg) => (
             <div
               key={msg.id}
@@ -943,6 +1084,7 @@ export default function AnalyzePage() {
               placeholder="Ask anything: show table, generate flowchart, trace entities, find anomalies..."
               rows={2}
               value={input}
+              disabled={isCaseLoading || !activeCaseId || isProcessing}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
@@ -954,7 +1096,7 @@ export default function AnalyzePage() {
           </div>
           <button
             type="submit"
-            disabled={!input.trim() || isProcessing}
+            disabled={!input.trim() || isProcessing || isCaseLoading || !activeCaseId}
             className="shrink-0 h-[68px] px-8 bg-brand-dark text-white font-medium rounded-xl hover:bg-brand-dark/90 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-md flex items-center gap-3"
           >
             <span>Execute</span>
