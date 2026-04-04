@@ -273,6 +273,46 @@ function detectPhoneToImeiIntent(userQuery: string): { msisdn: string } | null {
   return { msisdn };
 }
 
+function detectPhoneToIpIntent(userQuery: string): { msisdn: string } | null {
+  const q = userQuery.toLowerCase();
+  const asksIp =
+    q.includes('ip address') ||
+    q.includes('ip of') ||
+    q.includes('ip for') ||
+    q.includes('which ip') ||
+    (q.includes('ip') && q.includes('number'));
+  if (!asksIp) return null;
+
+  const msisdn = extractMsisdn(userQuery);
+  if (!msisdn) return null;
+  return { msisdn };
+}
+
+function extractIpAddress(userQuery: string): string | null {
+  const ip = userQuery.match(
+    /\b((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})\b/,
+  );
+  return ip ? ip[1] : null;
+}
+
+function detectIpToEventIntent(userQuery: string): { ip: string } | null {
+  const q = userQuery.toLowerCase();
+  const mentionsIpContext =
+    q.includes('ip address') || q.includes('ip') || q.includes('i.p');
+  if (!mentionsIpContext) return null;
+
+  const asksEvents =
+    q.includes('event') ||
+    q.includes('activity') ||
+    q.includes('involved') ||
+    q.includes('session');
+  if (!asksEvents) return null;
+
+  const ip = extractIpAddress(userQuery);
+  if (!ip) return null;
+  return { ip };
+}
+
 function buildPhoneToImeiQuery(msisdn: string): string {
   return `MATCH (p:PhoneNumber {msisdn: '${escapeCypherLiteral(msisdn)}'})
 OPTIONAL MATCH (p)-[:USED_DEVICE]-(dDirect:Device)
@@ -282,6 +322,62 @@ WITH [d IN (collect(DISTINCT dDirect) + collect(DISTINCT dViaPresence) + collect
 UNWIND devices AS d
 RETURN DISTINCT d.imei AS imei
 LIMIT 20`;
+}
+
+function buildIpToEventCandidates(ip: string): QueryCandidate[] {
+  const safeIp = escapeCypherLiteral(ip);
+  return [
+    {
+      name: 'IP to internet sessions (direct)',
+      strategy: 'intermediate_path',
+      cypher: `MATCH (ip:IPAddress {ip: '${safeIp}'})<-[:CONNECTED_TO]-(is:InternetSession)
+RETURN is.session_id AS event_id, is.start_time AS start_time, is.end_time AS end_time, 'InternetSession' AS event_type
+LIMIT 200`,
+    },
+    {
+      name: 'IP to internet sessions (undirected fallback)',
+      strategy: 'all_paths',
+      cypher: `MATCH (ip:IPAddress {ip: '${safeIp}'})-[r:CONNECTED_TO]-(is:InternetSession)
+RETURN is.session_id AS event_id, is.start_time AS start_time, is.end_time AS end_time, 'InternetSession' AS event_type, type(r) AS relation
+LIMIT 200`,
+    },
+    {
+      name: 'IP via device to internet sessions',
+      strategy: 'intermediate_path',
+      cypher: `MATCH (ip:IPAddress {ip: '${safeIp}'})<-[:USED]-(d:Device)-[:CONNECTED_TO|USED]-(is:InternetSession)
+RETURN DISTINCT is.session_id AS event_id, is.start_time AS start_time, is.end_time AS end_time, d.imei AS device_imei, 'InternetSession' AS event_type
+LIMIT 200`,
+    },
+  ];
+}
+
+function buildPhoneToIpCandidates(msisdn: string): QueryCandidate[] {
+  const safeMsisdn = escapeCypherLiteral(msisdn);
+  return [
+    {
+      name: 'Phone to IP via internet session (direct)',
+      strategy: 'intermediate_path',
+      cypher: `MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'})-[:CONNECTED_TO]-(is:InternetSession)-[:CONNECTED_TO]-(ip:IPAddress)
+RETURN DISTINCT ip.ip AS ip_address, is.session_id AS session_id, is.start_time AS start_time, is.end_time AS end_time
+LIMIT 200`,
+    },
+    {
+      name: 'Phone to IP via internet session (relationship-flex)',
+      strategy: 'all_paths',
+      cypher: `MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'})-[*1..2]-(is:InternetSession)-[r:CONNECTED_TO|USED]-(ip:IPAddress)
+RETURN DISTINCT ip.ip AS ip_address, is.session_id AS session_id, is.start_time AS start_time, is.end_time AS end_time, type(r) AS ip_link_type
+LIMIT 200`,
+    },
+    {
+      name: 'Phone to IP bounded path evidence',
+      strategy: 'shortest_path',
+      cypher: `MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'}), (ip:IPAddress)
+MATCH pth = shortestPath((p)-[*1..4]-(ip))
+WHERE ANY(n IN nodes(pth) WHERE n:InternetSession)
+RETURN pth
+LIMIT ${PATH_RETURN_LIMIT}`,
+    },
+  ];
 }
 
 function buildPhoneLocationPathCandidates(
@@ -624,6 +720,8 @@ export async function runInvestigationTurn(
   });
   const pathIntent = detectPhoneToLocationPathIntent(userQuery);
   const imeiIntent = detectPhoneToImeiIntent(userQuery);
+  const phoneIpIntent = detectPhoneToIpIntent(userQuery);
+  const ipEventIntent = detectIpToEventIntent(userQuery);
   const genericIntent = detectGenericComplexRelationshipIntent(userQuery);
   let candidateQueries: QueryCandidate[] = [];
   if (pathIntent) {
@@ -646,6 +744,18 @@ export async function runInvestigationTurn(
     await emit({
       stage: 'planning_query',
       message: `Detected IMEI lookup intent for phone ${imeiIntent.msisdn}. Using bounded indirect traversal to Device nodes.`,
+    });
+  } else if (phoneIpIntent) {
+    candidateQueries = buildPhoneToIpCandidates(phoneIpIntent.msisdn);
+    await emit({
+      stage: 'planning_query',
+      message: `Detected phone-to-IP intent for ${phoneIpIntent.msisdn}. Prioritizing InternetSession bridge queries.`,
+    });
+  } else if (ipEventIntent) {
+    candidateQueries = buildIpToEventCandidates(ipEventIntent.ip);
+    await emit({
+      stage: 'planning_query',
+      message: `Detected IP-to-event intent for ${ipEventIntent.ip}. Prioritizing InternetSession evidence queries.`,
     });
   } else if (genericIntent) {
     candidateQueries = buildGenericRelationshipCandidates(

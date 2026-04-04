@@ -41,6 +41,7 @@ GENERAL SEMANTICS (guidance, may evolve):
 - PhoneNumber INITIATED CommunicationEvent TARGET PhoneNumber.
 - CommunicationEvent SEEN_AT Location or AT_LOCATION Location via intermediate nodes, depending on ingestion.
 - PhoneNumber USED_DEVICE Device; Device USED IPAddress; Device SEEN_AT Location.
+- Internet activity path (preferred for IPDR-style lookups): PhoneNumber CONNECTED_TO InternetSession CONNECTED_TO IPAddress.
 - BankAccount PERFORMED FinancialTransaction.
 - Activity categories for CommunicationEvent.type:
 -   - CALL ACTIVITY: CALL-IN, CALL-OUT
@@ -62,6 +63,11 @@ GENERAL SEMANTICS (guidance, may evolve):
 -       RETURN DISTINCT d.imei AS imei
 -       LIMIT 20
 -   - Prefer specific known intermediate paths first when available, and keep traversal bounded.
+-   - For "IP address of phone number X", prioritize InternetSession bridge first:
+-       MATCH (p:PhoneNumber {msisdn: '<MSISDN>'})-[:CONNECTED_TO]-(is:InternetSession)-[:CONNECTED_TO]-(ip:IPAddress)
+-       RETURN DISTINCT ip.ip AS ip_address, is.session_id AS session_id
+-       LIMIT 200
+-   - Do not default to CommunicationEvent when the ask is IP/internet-session related.
 -
 - INVESTIGATIVE INTELLIGENCE CAPABILITIES (dynamic, accurate, versatile, robust)
 - The agent must reason on:
