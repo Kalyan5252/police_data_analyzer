@@ -5,13 +5,35 @@ import {
   runInvestigationTurn,
 } from '@/lib/agentOrchestrator';
 import { pgQuery } from '@/lib/postgres';
+import {
+  buildAgentCacheKey,
+  getOrCreateAgentResult,
+} from '@/lib/agentRequestCache';
 
 type AgentRequestBody = {
   message?: string;
   stream?: boolean;
+  includeGraph?: boolean;
   history?: ConversationTurn[];
   caseId?: string;
 };
+
+function normalizeCacheText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function buildHistoryFingerprint(turns: ConversationTurn[]): string {
+  const recent = turns.slice(-8);
+  const raw = recent
+    .map((t) => `${t.role}:${normalizeCacheText(t.content).slice(0, 200)}`)
+    .join('|');
+  let hash = 2166136261;
+  for (let i = 0; i < raw.length; i += 1) {
+    hash ^= raw.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
 
 function dedupeTurns(turns: ConversationTurn[]): ConversationTurn[] {
   const out: ConversationTurn[] = [];
@@ -53,7 +75,7 @@ async function loadCaseHistory(caseId: string): Promise<ConversationTurn[]> {
 
 export async function POST(req: NextRequest) {
   try {
-    const { message, stream, history, caseId } = (await req.json()) as AgentRequestBody;
+    const { message, stream, includeGraph, history, caseId } = (await req.json()) as AgentRequestBody;
 
     if (!message || typeof message !== 'string') {
       return NextResponse.json(
@@ -78,6 +100,12 @@ export async function POST(req: NextRequest) {
         ? await loadCaseHistory(caseId.trim())
         : [];
     const mergedHistory = dedupeTurns([...dbHistory, ...normalizedHistory]).slice(-60);
+    const cacheKey = buildAgentCacheKey({
+      caseId: typeof caseId === 'string' ? caseId.trim() : '',
+      includeGraph: Boolean(includeGraph),
+      message: normalizeCacheText(message),
+      contextFingerprint: buildHistoryFingerprint(mergedHistory),
+    });
 
     if (stream) {
       const encoder = new TextEncoder();
@@ -97,21 +125,37 @@ export async function POST(req: NextRequest) {
         start(controller) {
           const run = async () => {
             try {
-              const result = await runInvestigationTurn(message, {
-                history: mergedHistory,
-                onProgress: async (event: InvestigationProgressEvent) => {
-                  writeSse(controller, 'progress', event);
-                },
-              });
+              const { result, fromCache } = await getOrCreateAgentResult(
+                cacheKey,
+                () =>
+                  runInvestigationTurn(message, {
+                    history: mergedHistory,
+                    includeGraph: Boolean(includeGraph),
+                    onProgress: async (event: InvestigationProgressEvent) => {
+                      writeSse(controller, 'progress', event);
+                    },
+                  }),
+                60_000,
+              );
+
+              if (fromCache) {
+                writeSse(controller, 'progress', {
+                  stage: 'completed',
+                  message: 'Served from 1-minute response cache.',
+                  meta: { cacheHit: true },
+                } satisfies InvestigationProgressEvent);
+              }
 
               writeSse(controller, 'final', {
                 success: true,
                 finalAnswer: result.finalAnswer,
                 cypher: result.cypher,
                 records: result.records,
+                graph: result.graph,
                 modelResponses: result.modelResponses,
                 candidateQueries: result.candidateQueries,
                 queryEvaluation: result.queryEvaluation,
+                cacheHit: fromCache,
               });
             } catch (err: unknown) {
               const errMessage =
@@ -137,9 +181,15 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const result = await runInvestigationTurn(message, {
-      history: mergedHistory,
-    });
+    const { result, fromCache } = await getOrCreateAgentResult(
+      cacheKey,
+      () =>
+        runInvestigationTurn(message, {
+          history: mergedHistory,
+          includeGraph: Boolean(includeGraph),
+        }),
+      60_000,
+    );
 
     return NextResponse.json(
       {
@@ -147,9 +197,11 @@ export async function POST(req: NextRequest) {
         finalAnswer: result.finalAnswer,
         cypher: result.cypher,
         records: result.records,
+        graph: result.graph,
         modelResponses: result.modelResponses,
         candidateQueries: result.candidateQueries,
         queryEvaluation: result.queryEvaluation,
+        cacheHit: fromCache,
       },
       { status: 200 },
     );

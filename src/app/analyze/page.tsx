@@ -18,6 +18,8 @@ import {
   Download,
 } from 'lucide-react';
 import MarkdownMessage from '@/components/MarkdownMessage';
+import { extractGraphFromRecords, GraphPayload } from '@/lib/graphPayload';
+import { graphToMermaidFlowchart } from '@/lib/graphFlowchart';
 
 type LLMOpinion = {
   provider: string;
@@ -45,6 +47,7 @@ type Message = {
   timestamp: string;
   createdAt?: string;
   records?: Record<string, unknown>[];
+  graph?: GraphPayload;
   cypher?: string;
   candidateQueries?: string[];
   queryEvaluation?: string;
@@ -95,6 +98,7 @@ type StreamFinalPayload = {
   candidateQueries?: string[];
   queryEvaluation?: string;
   records?: Record<string, unknown>[];
+  graph?: GraphPayload;
   modelResponses?: LLMOpinion[];
 };
 
@@ -108,6 +112,18 @@ function getTimestamp() {
 
 function getMessageCreatedAt() {
   return new Date().toISOString();
+}
+
+function createMessageId(prefix = 'msg'): string {
+  const c = globalThis.crypto as Crypto | undefined;
+  if (c?.randomUUID) return c.randomUUID();
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function getWelcomeMessage(): Message {
@@ -326,6 +342,135 @@ function getSuggestions(messages: Message[]): string[] {
   return Array.from(new Set(suggestions)).slice(0, 3);
 }
 
+function buildFlowchartMarkdown(graph: GraphPayload): string {
+  const mermaid = graphToMermaidFlowchart(graph);
+  return `\`\`\`mermaid\n${mermaid}\n\`\`\``;
+}
+
+function extractMsisdnFromCypher(cypher?: string): string | null {
+  if (!cypher) return null;
+  const m = cypher.match(/msisdn\s*:\s*'(\d{10,15})'/i);
+  return m ? m[1] : null;
+}
+
+function inferGraphFromCallActivityRows(
+  records: Record<string, unknown>[],
+  cypher?: string,
+): GraphPayload | null {
+  if (!records.length) return null;
+  const hasCallShape = records.some(
+    (r) =>
+      typeof r.event_id === 'string' &&
+      typeof r.event_type === 'string' &&
+      Array.isArray(r.counterpart_numbers),
+  );
+  if (!hasCallShape) return null;
+
+  const subjectMsisdn = extractMsisdnFromCypher(cypher) || 'UNKNOWN';
+  const nodes: GraphPayload['nodes'] = [];
+  const edges: GraphPayload['edges'] = [];
+  const nodeMap = new Map<string, GraphPayload['nodes'][number]>();
+  const edgeSet = new Set<string>();
+
+  const addNode = (node: GraphPayload['nodes'][number]) => {
+    if (!nodeMap.has(node.id)) {
+      nodeMap.set(node.id, node);
+      nodes.push(node);
+    }
+  };
+
+  const addEdge = (edge: GraphPayload['edges'][number]) => {
+    const key = `${edge.from}|${edge.type}|${edge.to}`;
+    if (edgeSet.has(key)) return;
+    edgeSet.add(key);
+    edges.push(edge);
+  };
+
+  const subjectId = `phone:${subjectMsisdn}`;
+  addNode({
+    id: subjectId,
+    label: 'PhoneNumber',
+    title: `PhoneNumber\n${subjectMsisdn}`,
+    props: { msisdn: subjectMsisdn },
+  });
+
+  for (const row of records) {
+    const eventId = typeof row.event_id === 'string' ? row.event_id : '';
+    const eventType = typeof row.event_type === 'string' ? row.event_type : 'CALL';
+    if (!eventId) continue;
+
+    const eventNodeId = `event:${eventId}`;
+    addNode({
+      id: eventNodeId,
+      label: 'CommunicationEvent',
+      title: `CommunicationEvent\n${eventId}`,
+      props: {
+        event_id: eventId,
+        type: eventType,
+        timestamp:
+          typeof row.event_timestamp === 'string' ? row.event_timestamp : undefined,
+        duration:
+          typeof row.event_duration === 'number' ? row.event_duration : undefined,
+      },
+    });
+
+    addEdge({
+      id: `${subjectId}|${eventType}|${eventNodeId}`,
+      from: subjectId,
+      to: eventNodeId,
+      type: eventType,
+      props: {},
+    });
+
+    const counterparts = Array.isArray(row.counterpart_numbers)
+      ? row.counterpart_numbers
+      : [];
+    for (const cp of counterparts) {
+      if (typeof cp !== 'string' || !cp.trim()) continue;
+      const cpId = `phone:${cp}`;
+      addNode({
+        id: cpId,
+        label: 'PhoneNumber',
+        title: `PhoneNumber\n${cp}`,
+        props: { msisdn: cp },
+      });
+      addEdge({
+        id: `${eventNodeId}|COUNTERPART|${cpId}`,
+        from: eventNodeId,
+        to: cpId,
+        type: 'COUNTERPART',
+        props: {},
+      });
+    }
+  }
+
+  if (!nodes.length || !edges.length) return null;
+  return {
+    nodes,
+    edges,
+    meta: {
+      nodeCount: nodes.length,
+      edgeCount: edges.length,
+      truncated: false,
+    },
+  };
+}
+
+function detectFlowchartOnlyRequest(query: string): boolean {
+  const q = query.toLowerCase();
+  if (!detectFlowchartRequest(query)) return false;
+  return (
+    q.includes('from this output') ||
+    q.includes('from above') ||
+    q.includes('from previous') ||
+    q.includes('this output') ||
+    q.includes('same output') ||
+    q.includes('show flowchart') ||
+    q.includes('create a flowchart') ||
+    q.includes('draw a flowchart')
+  );
+}
+
 function detectRequestedExportFormat(query: string): ExportFormat | null {
   const q = query.toLowerCase();
   if (!/(export|download|file|excel|xlsx|csv|pdf|sheet|report)/i.test(query)) {
@@ -356,6 +501,13 @@ function detectExportMode(query: string): ExportMode {
   }
 
   return 'records';
+}
+
+function detectFlowchartRequest(query: string): boolean {
+  const q = query.toLowerCase();
+  return /flow\s*chart|flowchart|diagram|visuali[sz]e|relationship graph|graph view|show graph|node graph|mermaid/.test(
+    q,
+  );
 }
 
 async function consumeSSE(
@@ -494,11 +646,46 @@ export default function AnalyzePage() {
         timestamp: message.timestamp,
         createdAt: message.createdAt || getMessageCreatedAt(),
         records: message.records,
+        graph: message.graph,
         cypher: message.cypher,
+        candidateQueries: message.candidateQueries,
+        queryEvaluation: message.queryEvaluation,
         modelResponses: message.modelResponses,
         error: Boolean(message.error),
       }),
     });
+  };
+
+  const loadLatestSystemMessageFromDb = async (
+    caseId: string,
+  ): Promise<Message | null> => {
+    const attempts = 4;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const res = await fetch(
+        `/api/cases/${encodeURIComponent(caseId)}/messages`,
+        { cache: 'no-store' },
+      );
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.success && Array.isArray(data.messages)) {
+        const messagesFromDb = data.messages as Message[];
+        for (let i = messagesFromDb.length - 1; i >= 0; i -= 1) {
+          const msg = messagesFromDb[i];
+          if (msg.role !== 'system') continue;
+          if (
+            (msg.graph && Array.isArray(msg.graph.nodes) && msg.graph.nodes.length > 0) ||
+            (msg.records && msg.records.length > 0) ||
+            (typeof msg.cypher === 'string' && msg.cypher.trim().length > 0)
+          ) {
+            return msg;
+          }
+        }
+      }
+      if (attempt < attempts - 1) {
+        await wait(180);
+      }
+    }
+
+    return null;
   };
 
   useEffect(() => {
@@ -608,8 +795,9 @@ export default function AnalyzePage() {
     const userQuery = input.trim();
     const requestedExportFormat = detectRequestedExportFormat(userQuery);
     const requestedExportMode = detectExportMode(userQuery);
+    const includeGraph = detectFlowchartRequest(userQuery);
     const newUserMsg: Message = {
-      id: Date.now().toString(),
+      id: createMessageId('user'),
       role: 'user',
       content: userQuery,
       timestamp: getTimestamp(),
@@ -631,9 +819,89 @@ export default function AnalyzePage() {
     let agentRetriesExhausted = false;
 
     try {
-      const isLikelyCypher = /^\s*(match|merge|create|with|return)\b/i.test(
-        userQuery,
-      );
+      const startsWithCypherClause =
+        /^\s*(match|optional\s+match|merge|with|return|unwind)\b/i.test(
+          userQuery,
+        );
+      const startsWithCypherProcedure =
+        /^\s*call\s+[A-Za-z_][A-Za-z0-9_.]*\s*\(/i.test(userQuery);
+      const isLikelyCypher = startsWithCypherClause || startsWithCypherProcedure;
+      const isFlowchartOnlyRequest =
+        detectFlowchartOnlyRequest(userQuery) && !isLikelyCypher;
+
+      if (isFlowchartOnlyRequest) {
+        const sourceMessage = await loadLatestSystemMessageFromDb(activeCaseId);
+
+        if (sourceMessage) {
+          let derivedGraph: GraphPayload | null =
+            sourceMessage.graph && sourceMessage.graph.nodes.length > 0
+              ? sourceMessage.graph
+              : null;
+
+          if (!derivedGraph && sourceMessage.records && sourceMessage.records.length > 0) {
+            derivedGraph = extractGraphFromRecords(
+              sourceMessage.records as Record<string, unknown>[],
+            );
+            if (!derivedGraph.nodes.length) {
+              derivedGraph = inferGraphFromCallActivityRows(
+                sourceMessage.records as Record<string, unknown>[],
+                sourceMessage.cypher,
+              );
+            }
+          }
+
+          if (
+            !derivedGraph &&
+            typeof sourceMessage.cypher === 'string' &&
+            sourceMessage.cypher.trim()
+          ) {
+            const graphRes = await fetch('/api/neo4j/query', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                query: sourceMessage.cypher,
+                includeGraph: true,
+              }),
+            });
+            const graphData = await graphRes.json().catch(() => null);
+            if (graphRes.ok && graphData?.success && graphData?.graph?.nodes?.length) {
+              derivedGraph = graphData.graph as GraphPayload;
+            }
+          }
+
+          if (derivedGraph && derivedGraph.nodes.length > 0) {
+            const chartMsg: Message = {
+              id: createMessageId('system'),
+              role: 'system',
+              content:
+                `Relationship flowchart generated from the previous output.\n\n${buildFlowchartMarkdown(derivedGraph)}`,
+              timestamp: getTimestamp(),
+              createdAt: getMessageCreatedAt(),
+              graph: derivedGraph,
+            };
+            setMessages((prev) => [...prev, chartMsg]);
+            void persistMessage(activeCaseId, chartMsg).then(() =>
+              window.dispatchEvent(new Event('case-history-updated')),
+            );
+            return;
+          }
+        }
+
+        const noDataMsg: Message = {
+          id: createMessageId('system'),
+          role: 'system',
+          content:
+            'No prior graph-ready records were found in this case history to build a flowchart.',
+          timestamp: getTimestamp(),
+          createdAt: getMessageCreatedAt(),
+          error: true,
+        };
+        setMessages((prev) => [...prev, noDataMsg]);
+        void persistMessage(activeCaseId, noDataMsg).then(() =>
+          window.dispatchEvent(new Event('case-history-updated')),
+        );
+        return;
+      }
 
       if (isLikelyCypher) {
         setOperationState(createInitialOperation('cypher'));
@@ -641,7 +909,7 @@ export default function AnalyzePage() {
         const res = await fetch('/api/neo4j/query', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: userQuery }),
+          body: JSON.stringify({ query: userQuery, includeGraph }),
         });
 
         setOperationState((prev) => {
@@ -679,12 +947,13 @@ export default function AnalyzePage() {
           });
 
           const newSystemMsg: Message = {
-            id: (Date.now() + 1).toString(),
+            id: createMessageId('system'),
             role: 'system',
             content,
             timestamp: getTimestamp(),
             createdAt: getMessageCreatedAt(),
             records: data.records,
+            graph: data.graph,
             exportRequest:
               requestedExportFormat && data.records?.length
                 ? {
@@ -714,7 +983,7 @@ export default function AnalyzePage() {
         for (let attempt = 0; attempt < AGENT_MAX_ATTEMPTS; attempt++) {
           if (attempt > 0) {
             const retryMsg: Message = {
-              id: `${Date.now()}-retry-${attempt}`,
+              id: createMessageId(`retry-${attempt}`),
               role: 'system',
               content: 'Failed to generate, trying again.',
               timestamp: getTimestamp(),
@@ -734,6 +1003,7 @@ export default function AnalyzePage() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 message: userQuery,
+                includeGraph,
                 history: historyForContext,
                 caseId: activeCaseId,
                 stream: true,
@@ -781,12 +1051,13 @@ export default function AnalyzePage() {
             }
 
             const newSystemMsg: Message = {
-              id: (Date.now() + 1).toString(),
+              id: createMessageId('system'),
               role: 'system',
               content: payload.finalAnswer,
               timestamp: getTimestamp(),
               createdAt: getMessageCreatedAt(),
               records: payload.records,
+              graph: payload.graph,
               cypher: payload.cypher,
               candidateQueries: payload.candidateQueries,
               queryEvaluation: payload.queryEvaluation,
@@ -832,7 +1103,7 @@ export default function AnalyzePage() {
         : `Network error: Could not reach the query service. ${detail}`;
 
       const errorMsg: Message = {
-        id: (Date.now() + 1).toString(),
+        id: createMessageId('error'),
         role: 'system',
         content,
         timestamp: getTimestamp(),
@@ -1012,10 +1283,41 @@ export default function AnalyzePage() {
                   {msg.role === 'system' &&
                     (msg.cypher ||
                       msg.records ||
+                      msg.graph ||
                       msg.modelResponses ||
                       msg.queryEvaluation ||
                       msg.candidateQueries?.length) && (
                       <div className="mt-4 space-y-2">
+                        {msg.graph &&
+                          Array.isArray(msg.graph.nodes) &&
+                          msg.graph.nodes.length > 0 && (
+                            <details
+                              open
+                              className="group rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs"
+                            >
+                              <summary className="flex cursor-pointer items-center justify-between text-slate-600 font-semibold">
+                                <span>
+                                  Relationship Flowchart ({msg.graph.meta?.nodeCount ?? msg.graph.nodes.length}{' '}
+                                  nodes, {msg.graph.meta?.edgeCount ?? (Array.isArray(msg.graph.edges) ? msg.graph.edges.length : 0)} edges)
+                                </span>
+                                <span className="text-[10px] uppercase tracking-wide text-slate-400">
+                                  VIEW
+                                </span>
+                              </summary>
+                              <div className="mt-2">
+                                {msg.graph.meta?.truncated && (
+                                  <div className="mb-2 inline-flex items-center rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-700 uppercase tracking-wide">
+                                    Partial Graph Shown
+                                  </div>
+                                )}
+                                <MarkdownMessage
+                                  className="chat-markdown text-[13px] leading-relaxed text-brand-dark/90"
+                                  content={buildFlowchartMarkdown(msg.graph)}
+                                />
+                              </div>
+                            </details>
+                          )}
+
                         {msg.queryEvaluation && (
                           <details className="group rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
                             <summary className="flex cursor-pointer items-center justify-between text-slate-600 font-semibold">

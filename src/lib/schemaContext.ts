@@ -39,6 +39,10 @@ GENERAL SEMANTICS (guidance, may evolve):
 - IMPORTANT: "person" ALWAYS maps to PhoneNumber node (identifier: msisdn).
 - PhoneNumber CONNECTED_TO PhoneNumber: some communication link between numbers.
 - PhoneNumber INITIATED CommunicationEvent TARGET PhoneNumber.
+- Directional party mapping for communication events:
+-   - The number linked via :INITIATED is the initiator/caller party.
+-   - The number linked via :TARGET is the target/callee party.
+-   - If Device is linked as (ce:CommunicationEvent)-[:USED_DEVICE]->(d:Device), treat that device/IMEI as belonging to the INITIATED side for that event, not automatically to TARGET.
 - CommunicationEvent SEEN_AT Location or AT_LOCATION Location via intermediate nodes, depending on ingestion.
 - PhoneNumber USED_DEVICE Device; Device USED IPAddress; Device SEEN_AT Location.
 - Internet activity path (preferred for IPDR-style lookups): PhoneNumber CONNECTED_TO InternetSession CONNECTED_TO IPAddress.
@@ -63,6 +67,13 @@ GENERAL SEMANTICS (guidance, may evolve):
 -       RETURN DISTINCT d.imei AS imei
 -       LIMIT 20
 -   - Prefer specific known intermediate paths first when available, and keep traversal bounded.
+-   - IMPORTANT for CommunicationEvent based IMEI attribution:
+-       - Do NOT assign ce-[:USED_DEVICE]->Device IMEI to both numbers connected to the same CommunicationEvent.
+-       - Restrict to initiated side when user asks IMEI of number X through communication events:
+-           MATCH (p:PhoneNumber {msisdn: '<MSISDN>'})-[:INITIATED]->(ce:CommunicationEvent)-[:USED_DEVICE]->(d:Device)
+-           RETURN DISTINCT d.imei AS imei
+-           LIMIT 20
+-       - If initiated-side event mapping returns no rows, then use other independent evidence paths (for example direct PhoneNumber-Device, PresenceEvent bridge, bounded hop fallback) with clear preference order.
 -   - For "IP address of phone number X", prioritize InternetSession bridge first:
 -       MATCH (p:PhoneNumber {msisdn: '<MSISDN>'})-[:CONNECTED_TO]-(is:InternetSession)-[:CONNECTED_TO]-(ip:IPAddress)
 -       RETURN DISTINCT ip.ip AS ip_address, is.session_id AS session_id
@@ -131,6 +142,11 @@ DATE AND TIME HANDLING
 - User may write dates in many formats: "11/12/23", "11-12-2023", "Nov 12 2023", etc.
 - When user specifies a date (no explicit time), interpret it as the whole day in the relevant timezone.
 - Normalize dates to an ISO-like string where possible, but rely on how dates are stored in the properties.
+- For queries like "activity on YYYY-MM-DD", prefer date-level filtering instead of exact datetime equality, for example:
+-   WHERE date(ce.timestamp) = date('2025-04-01')
+- For conversational follow-ups like "on the same date" / "that date", resolve the date from recent user context and still apply safe date filtering.
+- For "calls received" or "incoming calls", filter to CommunicationEvent.type = 'CALL-IN' (do not mix with CALL-OUT).
+- Do not generate malformed temporal literals such as 'YYYY-MM-DD HH:MM:SS HH:MM:SS'.
 - For equality comparisons on stored date-time strings such as FinancialTransaction.date, ALWAYS wrap BOTH SIDES in datetime(), for example:
 -   MATCH (t:FinancialTransaction)
 -   WHERE datetime(t.date) = datetime('2025-04-09T00:00:00')

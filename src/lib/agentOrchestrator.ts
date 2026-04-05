@@ -2,6 +2,11 @@ import { getDriver } from '@/lib/neo4j';
 import { GRAPH_SCHEMA_DESCRIPTION } from '@/lib/schemaContext';
 import { callLLM, LLMMessage, LLMResponse } from '@/lib/llmClients';
 import { normalizeTemporalFields } from '@/lib/timeNormalization';
+import {
+  extractGraphFromRecords,
+  GraphPayload,
+  serializeNeo4jRecord,
+} from '@/lib/graphPayload';
 
 export type ConversationTurn = {
   role: 'user' | 'system';
@@ -27,6 +32,7 @@ export type InvestigationTurnResult = {
   finalAnswer: string;
   cypher: string;
   records: Record<string, unknown>[];
+  graph?: GraphPayload;
   modelResponses: LLMResponse[];
   candidateQueries?: string[];
   queryEvaluation?: string;
@@ -34,6 +40,7 @@ export type InvestigationTurnResult = {
 
 type RunOptions = {
   history?: ConversationTurn[];
+  includeGraph?: boolean;
   onProgress?: (event: InvestigationProgressEvent) => void | Promise<void>;
 };
 
@@ -49,7 +56,9 @@ type QueryCandidate = {
 
 type QueryExecution = {
   candidate: QueryCandidate;
+  executedCypher: string;
   records: Record<string, unknown>[];
+  graph?: GraphPayload;
   error?: string;
 };
 
@@ -58,7 +67,14 @@ function buildHistoryContext(history: ConversationTurn[]): string {
   const recent = history.slice(-24);
   const context = recent
     .map((turn, idx) => {
-      const clean = turn.content.replace(/\s+/g, ' ').trim().slice(0, 700);
+      const clean = turn.content
+        .replace(
+          /\b(\d{4}-\d{2}-\d{2})\s+00:00:00\s+(\d{2}:\d{2}:\d{2})\b/g,
+          '$1 $2',
+        )
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 700);
       return `${idx + 1}. ${turn.role.toUpperCase()}: ${clean}`;
     })
     .join('\n');
@@ -85,6 +101,58 @@ function normalizeCypherForSafety(cypher: string): string {
       const capped = Math.min(Number(upper), MAX_HOPS) || MAX_HOPS;
       return `*1..${capped}`;
     });
+
+  query = repairCypherTemporalLiterals(query);
+
+  return query;
+}
+
+function isTemporalParseError(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes('cannot be parsed to a datetime') ||
+    m.includes('cannot be parsed to a date') ||
+    (m.includes('datetime') && m.includes('cannot be parsed'))
+  );
+}
+
+function repairCypherTemporalLiterals(cypher: string): string {
+  let query = cypher;
+
+  // Fix duplicated time fragments:
+  // datetime('YYYY-MM-DD HH:MM:SS HH:MM:SS') -> datetime('YYYY-MM-DDTHH:MM:SS') using last time.
+  query = query.replace(
+    /datetime\(\s*'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{2}:\d{2}:\d{2})'\s*\)/gi,
+    (_m, d: string, _t1: string, t2: string) => `datetime('${d}T${t2}')`,
+  );
+
+  // Normalize datetime('YYYY-MM-DD HH:MM:SS') -> datetime('YYYY-MM-DDTHH:MM:SS')
+  query = query.replace(
+    /datetime\(\s*'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})'\s*\)/gi,
+    (_m, d: string, t: string) => `datetime('${d}T${t}')`,
+  );
+
+  // Normalize datetime("YYYY-MM-DD ...") with double-quoted literals.
+  query = query.replace(
+    /datetime\(\s*"(\d{4}-\d{2}-\d{2})\s+([^"]+)"\s*\)/gi,
+    (_m, d: string, tail: string) => {
+      const times = tail.match(/\d{2}:\d{2}:\d{2}/g);
+      const chosen = times && times.length ? times[times.length - 1] : '00:00:00';
+      return `datetime('${d}T${chosen}')`;
+    },
+  );
+
+  // date('YYYY-MM-DD HH:MM:SS' [HH:MM:SS]) -> date('YYYY-MM-DD')
+  query = query.replace(
+    /date\(\s*'(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}:\d{2}(?:\s+\d{2}:\d{2}:\d{2})?'\s*\)/gi,
+    (_m, d: string) => `date('${d}')`,
+  );
+
+  // date("YYYY-MM-DD ...") -> date('YYYY-MM-DD')
+  query = query.replace(
+    /date\(\s*"(\d{4}-\d{2}-\d{2})[^"]*"\s*\)/gi,
+    (_m, d: string) => `date('${d}')`,
+  );
 
   return query;
 }
@@ -149,6 +217,104 @@ function buildActivityTypeHint(userQuery: string): string {
   }
 
   return '';
+}
+
+function extractIsoDate(userQuery: string): string | null {
+  const iso = userQuery.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
+  if (iso) return iso[1];
+
+  const dmy = userQuery.match(/\b(\d{2})[/-](\d{2})[/-](20\d{2})\b/);
+  if (dmy) {
+    const dd = dmy[1];
+    const mm = dmy[2];
+    const yyyy = dmy[3];
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  return null;
+}
+
+function extractLatestMsisdnFromHistory(history: ConversationTurn[]): string | null {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const turn = history[i];
+    if (turn.role !== 'user') continue;
+    const msisdn = extractMsisdn(turn.content);
+    if (msisdn) return msisdn;
+  }
+  return null;
+}
+
+function extractLatestDateFromHistory(history: ConversationTurn[]): string | null {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const turn = history[i];
+    if (turn.role !== 'user') continue;
+    const date = extractIsoDate(turn.content);
+    if (date) return date;
+  }
+  return null;
+}
+
+function hasSameDateReference(userQuery: string): boolean {
+  return /\bsame date\b|\bthat date\b|\bsame day\b/i.test(userQuery);
+}
+
+function detectCallActivityOnDateIntent(
+  userQuery: string,
+): { msisdn: string; date: string } | null {
+  const q = userQuery.toLowerCase();
+  const asksCallActivity =
+    q.includes('call activity') ||
+    q.includes('call details') ||
+    (q.includes('call') && q.includes('activity'));
+  if (!asksCallActivity) return null;
+
+  const msisdn = extractMsisdn(userQuery);
+  const date = extractIsoDate(userQuery);
+  if (!msisdn || !date) return null;
+  return { msisdn, date };
+}
+
+function buildCallActivityOnDateQuery(
+  msisdn: string,
+  date: string,
+  mode: 'all' | 'received' | 'outgoing' = 'all',
+): string {
+  const safeMsisdn = escapeCypherLiteral(msisdn);
+  const safeDate = escapeCypherLiteral(date);
+  const callTypes =
+    mode === 'received'
+      ? "['CALL-IN']"
+      : mode === 'outgoing'
+        ? "['CALL-OUT']"
+        : "['CALL-IN', 'CALL-OUT']";
+  return `MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'})-[:INITIATED|TARGET]-(ce:CommunicationEvent)
+WHERE ce.type IN ${callTypes}
+  AND toString(ce.timestamp) STARTS WITH '${safeDate}'
+OPTIONAL MATCH (ce)-[:INITIATED|TARGET]-(other:PhoneNumber)
+WHERE other.msisdn <> p.msisdn
+RETURN ce.event_id AS event_id, ce.type AS event_type, ce.timestamp AS event_timestamp, ce.duration AS event_duration, collect(DISTINCT other.msisdn) AS counterpart_numbers
+ORDER BY ce.timestamp ASC
+LIMIT 200`;
+}
+
+function detectReceivedCallsOnDateFollowUpIntent(
+  userQuery: string,
+  history: ConversationTurn[],
+): { msisdn: string; date: string } | null {
+  const q = userQuery.toLowerCase();
+  const asksCalls = /\bcall\b|\bcalls\b|\bcall activity\b/.test(q);
+  const asksReceived = /\breceived\b|\bincoming\b/.test(q);
+  if (!asksCalls || !asksReceived) return null;
+
+  const explicitMsisdn = extractMsisdn(userQuery);
+  const msisdn = explicitMsisdn || extractLatestMsisdnFromHistory(history);
+  if (!msisdn) return null;
+
+  const explicitDate = extractIsoDate(userQuery);
+  const sameDateRef = hasSameDateReference(userQuery);
+  const date = explicitDate || (sameDateRef ? extractLatestDateFromHistory(history) : null);
+  if (!date) return null;
+
+  return { msisdn, date };
 }
 
 type Anchor = {
@@ -616,20 +782,50 @@ async function generateCypher(
   return normalizeCypherForSafety(stripCypherFence(response.content));
 }
 
-async function runCypher(cypher: string): Promise<Record<string, unknown>[]> {
+async function runCypher(
+  cypher: string,
+  includeGraph = false,
+): Promise<{
+  records: Record<string, unknown>[];
+  graph?: GraphPayload;
+  executedCypher: string;
+}> {
   const driver = getDriver();
   const session = driver.session();
   try {
-    const result = await session.run(cypher);
-    const records = result.records.map((record) => {
-      const obj: Record<string, unknown> = {};
-      record.keys.forEach((key) => {
-        const field = String(key);
-        obj[field] = record.get(field);
+    const mapResultRecords = (
+      result: {
+        records: Array<{
+          keys: PropertyKey[];
+          get: (key: PropertyKey) => unknown;
+        }>;
+      },
+    ) =>
+      result.records.map((record) => {
+        const obj = serializeNeo4jRecord({
+          keys: record.keys.map((k) => String(k)),
+          get: (key: string) => record.get(key),
+        });
+        return normalizeTemporalFields(obj as Record<string, unknown>);
       });
-      return normalizeTemporalFields(obj);
-    });
-    return records;
+
+    try {
+      const result = await session.run(cypher);
+      const records = mapResultRecords(result);
+      const graph = includeGraph ? extractGraphFromRecords(records) : undefined;
+      return { records, graph, executedCypher: cypher };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!isTemporalParseError(message)) throw err;
+
+      const repairedCypher = repairCypherTemporalLiterals(cypher);
+      if (repairedCypher === cypher) throw err;
+
+      const repairedResult = await session.run(repairedCypher);
+      const records = mapResultRecords(repairedResult);
+      const graph = includeGraph ? extractGraphFromRecords(records) : undefined;
+      return { records, graph, executedCypher: repairedCypher };
+    }
   } finally {
     await session.close();
   }
@@ -718,13 +914,49 @@ export async function runInvestigationTurn(
     stage: 'planning_query',
     message: 'Planning graph query from your natural language request.',
   });
+  const receivedFollowUpIntent = detectReceivedCallsOnDateFollowUpIntent(
+    userQuery,
+    options.history ?? [],
+  );
+  const callOnDateIntent = detectCallActivityOnDateIntent(userQuery);
   const pathIntent = detectPhoneToLocationPathIntent(userQuery);
   const imeiIntent = detectPhoneToImeiIntent(userQuery);
   const phoneIpIntent = detectPhoneToIpIntent(userQuery);
   const ipEventIntent = detectIpToEventIntent(userQuery);
   const genericIntent = detectGenericComplexRelationshipIntent(userQuery);
   let candidateQueries: QueryCandidate[] = [];
-  if (pathIntent) {
+  if (receivedFollowUpIntent) {
+    candidateQueries = [
+      {
+        name: 'Received calls on date (follow-up deterministic)',
+        strategy: 'intermediate_path',
+        cypher: buildCallActivityOnDateQuery(
+          receivedFollowUpIntent.msisdn,
+          receivedFollowUpIntent.date,
+          'received',
+        ),
+      },
+    ];
+    await emit({
+      stage: 'planning_query',
+      message: `Resolved follow-up context: received calls for ${receivedFollowUpIntent.msisdn} on ${receivedFollowUpIntent.date}. Using safe timestamp-prefix filtering.`,
+    });
+  } else if (callOnDateIntent) {
+    candidateQueries = [
+      {
+        name: 'Call activity on date (deterministic)',
+        strategy: 'intermediate_path',
+        cypher: buildCallActivityOnDateQuery(
+          callOnDateIntent.msisdn,
+          callOnDateIntent.date,
+        ),
+      },
+    ];
+    await emit({
+      stage: 'planning_query',
+      message: `Detected call-activity-by-date intent for ${callOnDateIntent.msisdn} on ${callOnDateIntent.date}. Using safe timestamp-prefix filtering.`,
+    });
+  } else if (pathIntent) {
     candidateQueries = buildPhoneLocationPathCandidates(
       pathIntent.msisdn,
       pathIntent.cellId,
@@ -803,11 +1035,24 @@ export async function runInvestigationTurn(
       meta: { cypher: candidate.cypher, strategy: candidate.strategy },
     });
     try {
-      const resultRows = await runCypher(candidate.cypher);
-      executions.push({ candidate, records: resultRows });
+      const result = await runCypher(
+        candidate.cypher,
+        Boolean(options.includeGraph),
+      );
+      executions.push({
+        candidate,
+        executedCypher: result.executedCypher,
+        records: result.records,
+        graph: result.graph,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      executions.push({ candidate, records: [], error: message });
+      executions.push({
+        candidate,
+        executedCypher: candidate.cypher,
+        records: [],
+        error: message,
+      });
       await emit({
         stage: 'fetching_data',
         message: `Strategy failed (${candidate.name}): ${message}`,
@@ -830,8 +1075,9 @@ export async function runInvestigationTurn(
     executions,
     historyContext,
   );
-  const cypher = evaluation.best.candidate.cypher;
+  const cypher = evaluation.best.executedCypher || evaluation.best.candidate.cypher;
   const records = evaluation.best.records;
+  const graph = evaluation.best.graph;
   const queryEvaluation = `Selected strategy: ${evaluation.best.candidate.name} (${evaluation.best.candidate.strategy}). ${evaluation.summary}`;
   await emit({
     stage: 'data_fetched',
@@ -839,6 +1085,7 @@ export async function runInvestigationTurn(
     meta: {
       recordCount: records.length,
       preview: records.slice(0, 3),
+      graphMeta: graph?.meta,
       queryEvaluation,
     },
   });
@@ -918,6 +1165,7 @@ export async function runInvestigationTurn(
     finalAnswer,
     cypher,
     records,
+    graph,
     modelResponses,
     candidateQueries: candidateQueries.map((q) => q.cypher),
     queryEvaluation,

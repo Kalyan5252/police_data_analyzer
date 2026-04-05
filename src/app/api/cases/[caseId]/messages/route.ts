@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { pgQuery, withPgClient } from '@/lib/postgres';
+import { GraphPayload } from '@/lib/graphPayload';
 
 type StoredMessage = {
   id: string;
@@ -9,6 +10,7 @@ type StoredMessage = {
   timestamp: string;
   createdAt: string;
   records?: Record<string, unknown>[];
+  graph?: GraphPayload;
   cypher?: string;
   candidateQueries?: string[];
   queryEvaluation?: string;
@@ -34,6 +36,7 @@ export async function GET(
       createdAt: string;
       payload: {
         records?: Record<string, unknown>[];
+        graph?: GraphPayload;
         cypher?: string;
         candidateQueries?: string[];
         queryEvaluation?: string;
@@ -65,6 +68,7 @@ export async function GET(
       createdAt: string;
       payload: {
         records?: Record<string, unknown>[];
+        graph?: GraphPayload;
         cypher?: string;
         candidateQueries?: string[];
         queryEvaluation?: string;
@@ -80,6 +84,10 @@ export async function GET(
       records: Array.isArray(row.payload?.records)
         ? (row.payload.records as Record<string, unknown>[])
         : undefined,
+      graph:
+        row.payload?.graph && typeof row.payload.graph === 'object'
+          ? (row.payload.graph as GraphPayload)
+          : undefined,
       cypher: typeof row.payload?.cypher === 'string' ? row.payload.cypher : undefined,
       candidateQueries: Array.isArray(row.payload?.candidateQueries)
         ? (row.payload.candidateQueries as string[])
@@ -132,6 +140,10 @@ export async function POST(
     typeof body.id === 'string' && body.id.trim() ? body.id : randomUUID();
   const payload = {
     records: Array.isArray(body.records) ? body.records : undefined,
+    graph:
+      body.graph && typeof body.graph === 'object'
+        ? (body.graph as GraphPayload)
+        : undefined,
     cypher: typeof body.cypher === 'string' ? body.cypher : undefined,
     candidateQueries: Array.isArray(body.candidateQueries)
       ? body.candidateQueries.filter((v: unknown) => typeof v === 'string')
