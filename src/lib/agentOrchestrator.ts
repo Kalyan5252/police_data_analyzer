@@ -172,6 +172,30 @@ function extractMsisdn(userQuery: string): string | null {
   return match ? match[1] : null;
 }
 
+function extractAllMsisdns(userQuery: string): string[] {
+  const matches = userQuery.match(/\b(\d{10,15})\b/g) || [];
+  return Array.from(new Set(matches));
+}
+
+function extractLatestTwoMsisdnsFromHistory(history: ConversationTurn[]): [string, string] | null {
+  const found: string[] = [];
+  const seen = new Set<string>();
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const turn = history[i];
+    if (turn.role !== 'user') continue;
+    const nums = extractAllMsisdns(turn.content);
+    for (const n of nums) {
+      if (seen.has(n)) continue;
+      seen.add(n);
+      found.push(n);
+      if (found.length >= 2) {
+        return [found[1], found[0]];
+      }
+    }
+  }
+  return null;
+}
+
 function extractCellId(userQuery: string): string | null {
   const explicit = userQuery.match(
     /\bcell[_\s-]?id\b\s*[:=]?\s*['"]?([A-Za-z0-9_-]{5,})/i,
@@ -181,6 +205,17 @@ function extractCellId(userQuery: string): string | null {
   const tower = userQuery.match(/\btower\b\s*[:=]?\s*['"]?([A-Za-z0-9_-]{5,})/i);
   if (tower) return tower[1];
 
+  return null;
+}
+
+function extractLatestCellIdFromHistory(history: ConversationTurn[]): string | null {
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const turn = history[i];
+    const explicit = extractCellId(turn.content);
+    if (explicit) return explicit;
+    const generic = turn.content.match(/\b(?=[A-Z0-9_-]{8,}\b)(?=.*[A-Z])(?=.*\d)[A-Z0-9_-]+\b/);
+    if (generic) return generic[0];
+  }
   return null;
 }
 
@@ -202,6 +237,157 @@ function detectPhoneToLocationPathIntent(
   if (!msisdn || !cellId) return null;
 
   return { msisdn, cellId };
+}
+
+function detectPhoneEventsAtCellIntent(
+  userQuery: string,
+): { msisdn: string; cellId: string } | null {
+  const q = userQuery.toLowerCase();
+  const asksEventsAtCell =
+    (/\bevent\b|\bevents\b|\bactivity\b/.test(q) &&
+      /\bcell\b|\bcell id\b|\btower\b|\blocation\b/.test(q)) ||
+    /\bevents?\s+at\s+cell/.test(q);
+  if (!asksEventsAtCell) return null;
+
+  const msisdn = extractMsisdn(userQuery);
+  const cellId = extractCellId(userQuery);
+  if (!msisdn || !cellId) return null;
+  return { msisdn, cellId };
+}
+
+function buildPhoneEventsAtCellQuery(msisdn: string, cellId: string): string {
+  const safeMsisdn = escapeCypherLiteral(msisdn);
+  const safeCellId = escapeCypherLiteral(cellId);
+  return `MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'})-[:INITIATED|TARGET]-(ce:CommunicationEvent)
+WITH p, ce, toString(ce.timestamp) AS ce_ts, right(toString(ce.timestamp), 8) AS ce_tod
+MATCH (p)-[:SEEN_AT]-(pe:PresenceEvent)-[:AT_LOCATION]-(l:Location {cell_id: '${safeCellId}'})
+WITH ce, ce_ts, ce_tod, l, toString(coalesce(pe.timestamp, pe.time_stamp)) AS pe_ts, right(toString(coalesce(pe.timestamp, pe.time_stamp)), 8) AS pe_tod
+WHERE ce_ts = pe_ts OR ce_tod = pe_tod
+RETURN DISTINCT ce.event_id AS event_id, ce.type AS event_type, ce.timestamp AS event_timestamp, ce.duration AS event_duration, l.cell_id AS cell_id, pe_ts AS matched_presence_timestamp
+ORDER BY ce.timestamp DESC
+LIMIT 200`;
+}
+
+function detectPhoneToPhoneLinkIntent(
+  userQuery: string,
+): { a: string; b: string } | null {
+  const msisdns = extractAllMsisdns(userQuery);
+  if (msisdns.length < 2) return null;
+
+  const q = userQuery.toLowerCase();
+  const linkWords =
+    /connect|connected|relation|relationship|link|linked|path|hidden|between|network|try for/.test(
+      q,
+    );
+
+  // If user provided exactly two phone-like numbers, prefer hidden-link strategy
+  // for investigation prompts even when phrasing is brief (e.g., "try for X and Y").
+  if (!linkWords && msisdns.length !== 2) return null;
+  return { a: msisdns[0], b: msisdns[1] };
+}
+
+function detectCoLocationIntent(
+  userQuery: string,
+): { a: string; b: string; cellId?: string } | null {
+  const msisdns = extractAllMsisdns(userQuery);
+  if (msisdns.length < 2) return null;
+  const q = userQuery.toLowerCase();
+  const asksCoLocation =
+    /same place|same location|located in same|same cell|co-?location|at any time|together at/.test(
+      q,
+    );
+  if (!asksCoLocation) return null;
+  const cellId = extractCellId(userQuery) || undefined;
+  return { a: msisdns[0], b: msisdns[1], cellId };
+}
+
+function detectCoLocationTimeFollowUpIntent(
+  userQuery: string,
+  history: ConversationTurn[],
+): { a: string; b: string; cellId?: string } | null {
+  const q = userQuery.toLowerCase();
+  const asksTime =
+    /\bwhen\b|\bwhat time\b|\bat what\b|\btime\b|\btimestamp\b/.test(q);
+  const asksPlace =
+    /\bcell\b|\blocation\b|\bsame place\b|\bthat cell\b|\bthat location\b/.test(q);
+  const referencesPair = /\bthey\b|\bboth\b/.test(q);
+  if (!asksTime || !asksPlace || !referencesPair) return null;
+
+  const pair = extractLatestTwoMsisdnsFromHistory(history);
+  if (!pair) return null;
+  const cellId = extractCellId(userQuery) || extractLatestCellIdFromHistory(history) || undefined;
+  return { a: pair[0], b: pair[1], cellId };
+}
+
+function buildCoLocationCandidates(
+  aMsisdn: string,
+  bMsisdn: string,
+  cellId?: string,
+): QueryCandidate[] {
+  const a = escapeCypherLiteral(aMsisdn);
+  const b = escapeCypherLiteral(bMsisdn);
+  const cellFilter = cellId ? `AND loc.cell_id = '${escapeCypherLiteral(cellId)}'` : '';
+  return [
+    {
+      name: 'Shared location with presence timestamps',
+      strategy: 'intermediate_path',
+      cypher: `MATCH (a:PhoneNumber {msisdn: '${a}'})-[:SEEN_AT]-(pea:PresenceEvent)-[:AT_LOCATION]-(loc:Location)
+MATCH (b:PhoneNumber {msisdn: '${b}'})-[:SEEN_AT]-(peb:PresenceEvent)-[:AT_LOCATION]-(loc)
+WHERE 1=1
+  ${cellFilter}
+WITH a, b, loc,
+  collect(DISTINCT pea.event_id) AS a_event_ids,
+  collect(DISTINCT peb.event_id) AS b_event_ids,
+  collect(DISTINCT coalesce(pea.timestamp, pea.time_stamp)) AS a_timestamps,
+  collect(DISTINCT coalesce(peb.timestamp, peb.time_stamp)) AS b_timestamps
+RETURN a.msisdn AS number_a, b.msisdn AS number_b, loc.cell_id AS cell_id, a_event_ids[0..100] AS a_event_ids, b_event_ids[0..100] AS b_event_ids, a_timestamps[0..100] AS a_timestamps, b_timestamps[0..100] AS b_timestamps, size(a_timestamps) + size(b_timestamps) AS link_strength
+ORDER BY link_strength DESC
+LIMIT 20`,
+    },
+    {
+      name: 'Shared location summary fallback',
+      strategy: 'all_paths',
+      cypher: `MATCH (a:PhoneNumber {msisdn: '${a}'})-[:SEEN_AT]-(:PresenceEvent)-[:AT_LOCATION]-(loc:Location)<-[:AT_LOCATION]-(:PresenceEvent)-[:SEEN_AT]-(b:PhoneNumber {msisdn: '${b}'})
+WHERE 1=1
+  ${cellFilter}
+RETURN a.msisdn AS number_a, b.msisdn AS number_b, collect(DISTINCT loc.cell_id)[0..100] AS common_cell_ids, size(collect(DISTINCT loc.cell_id)) AS common_cell_count
+LIMIT 1`,
+    },
+  ];
+}
+
+function buildPhoneToPhoneLinkCandidates(aMsisdn: string, bMsisdn: string): QueryCandidate[] {
+  const a = escapeCypherLiteral(aMsisdn);
+  const b = escapeCypherLiteral(bMsisdn);
+  return [
+    {
+      name: 'Shortest bounded path (with chain evidence)',
+      strategy: 'shortest_path',
+      cypher: `MATCH (a:PhoneNumber {msisdn: '${a}'}), (b:PhoneNumber {msisdn: '${b}'})
+MATCH p = shortestPath((a)-[*1..${MAX_HOPS}]-(b))
+RETURN p, length(p) AS hop_count, [r IN relationships(p) | type(r)] AS relationship_chain
+LIMIT ${PATH_RETURN_LIMIT}`,
+    },
+    {
+      name: 'All bounded paths (ranked)',
+      strategy: 'all_paths',
+      cypher: `MATCH (a:PhoneNumber {msisdn: '${a}'}), (b:PhoneNumber {msisdn: '${b}'})
+MATCH p = (a)-[*1..${MAX_HOPS}]-(b)
+RETURN p, length(p) AS hop_count, [r IN relationships(p) | type(r)] AS relationship_chain
+ORDER BY hop_count ASC
+LIMIT ${PATH_RETURN_LIMIT}`,
+    },
+    {
+      name: 'Shared communication/location evidence',
+      strategy: 'intermediate_path',
+      cypher: `MATCH (a:PhoneNumber {msisdn: '${a}'}), (b:PhoneNumber {msisdn: '${b}'})
+OPTIONAL MATCH (a)-[:INITIATED|TARGET]-(ce:CommunicationEvent)-[:INITIATED|TARGET]-(b)
+OPTIONAL MATCH (a)-[:SEEN_AT]-(pea:PresenceEvent)-[:AT_LOCATION|SEEN_AT]-(loc:Location)<-[:AT_LOCATION|SEEN_AT]-(peb:PresenceEvent)-[:SEEN_AT]-(b)
+WITH a, b, collect(DISTINCT ce.event_id) AS common_event_ids, collect(DISTINCT loc.cell_id) AS common_cell_ids
+RETURN a.msisdn AS number_a, b.msisdn AS number_b, common_event_ids, common_cell_ids, size(common_event_ids) + size(common_cell_ids) AS link_strength
+LIMIT 1`,
+    },
+  ];
 }
 
 function buildActivityTypeHint(userQuery: string): string {
@@ -897,7 +1083,7 @@ async function synthesizeFinalAnswer(
   const system: LLMMessage = {
     role: 'system',
     content:
-      'You are a senior investigative analyst. You receive multiple model opinions and the underlying graph query and results. Your job is to synthesize them into ONE clear, concise answer for a police officer.\n\nVERY IMPORTANT OUTPUT RULES:\n- Start with a direct answer in 2–4 short sentences.\n- When the user explicitly asks to “show data”, prefer **tables or bullet-point lists of records** instead of long narrative reports.\n- Format output in valid Markdown for UI rendering.\n- When showing a table, use proper GitHub-style markdown table syntax with a header separator row.\n- If the user asks for a flow chart or diagram, output Mermaid inside a fenced block: ```mermaid ... ```.\n- Avoid email-style headers (no To:, From:, Subject:, dates, or greetings like “Hello Officer”).\n- Prefer neutral section headings like “Facts from the Data” only when useful.\n- Prefer statements that are clearly supported by the data.\n- If records include initiated_numbers/target_numbers/counterpart_numbers/event_imeis, use them explicitly in reasoning.\n- Do NOT claim caller/callee/counterpart is unavailable when those fields are present and non-empty in records.\n- If models disagree, call out the uncertainty and explain which parts are certain vs speculative.\n- Always distinguish facts (directly in the data) from hypotheses.\n- If the data is insufficient for a conclusion, say so and optionally suggest follow-up queries.',
+      'You are a senior investigative analyst. You receive multiple model opinions and the underlying graph query and results. Your job is to synthesize them into ONE clear, concise answer for a police officer.\n\nVERY IMPORTANT OUTPUT RULES:\n- Start with a direct answer in 2–4 short sentences.\n- When the user explicitly asks to “show data”, prefer **tables or bullet-point lists of records** instead of long narrative reports.\n- Format output in valid Markdown for UI rendering.\n- When showing a table, use proper GitHub-style markdown table syntax with a header separator row.\n- If the user asks for a flow chart or diagram, output Mermaid inside a fenced block: ```mermaid ... ```.\n- Avoid email-style headers (no To:, From:, Subject:, dates, or greetings like “Hello Officer”).\n- Prefer neutral section headings like “Facts from the Data” only when useful.\n- Prefer statements that are clearly supported by the data.\n- If records include path fields (p, hop_count, relationship_chain), treat that as concrete hidden-link evidence.\n- If records include initiated_numbers/target_numbers/counterpart_numbers/event_imeis, use them explicitly in reasoning.\n- If records include a_timestamps/b_timestamps (co-location evidence), surface those times explicitly.\n- Do NOT claim caller/callee/counterpart or timestamps are unavailable when corresponding fields are present and non-empty in records.\n- If records are non-empty for connectivity queries, do NOT conclude "no relationship".\n- If models disagree, call out the uncertainty and explain which parts are certain vs speculative.\n- Always distinguish facts (directly in the data) from hypotheses.\n- If the data is insufficient for a conclusion, say so and optionally suggest follow-up queries.',
   };
 
   const recordsJson =
@@ -973,10 +1159,16 @@ export async function runInvestigationTurn(
     userQuery,
     options.history ?? [],
   );
+  const coLocationFollowUpIntent = detectCoLocationTimeFollowUpIntent(
+    userQuery,
+    options.history ?? [],
+  );
+  const coLocationIntent = detectCoLocationIntent(userQuery);
   const receivedFollowUpIntent = detectReceivedCallsOnDateFollowUpIntent(
     userQuery,
     options.history ?? [],
   );
+  const phonePhoneIntent = detectPhoneToPhoneLinkIntent(userQuery);
   const callOnDateIntent = detectCallActivityOnDateIntent(userQuery);
   const pathIntent = detectPhoneToLocationPathIntent(userQuery);
   const imeiIntent = detectPhoneToImeiIntent(userQuery);
@@ -984,7 +1176,27 @@ export async function runInvestigationTurn(
   const ipEventIntent = detectIpToEventIntent(userQuery);
   const genericIntent = detectGenericComplexRelationshipIntent(userQuery);
   let candidateQueries: QueryCandidate[] = [];
-  if (eventsOnDateIntent) {
+  if (coLocationFollowUpIntent) {
+    candidateQueries = buildCoLocationCandidates(
+      coLocationFollowUpIntent.a,
+      coLocationFollowUpIntent.b,
+      coLocationFollowUpIntent.cellId,
+    );
+    await emit({
+      stage: 'planning_query',
+      message: `Resolved follow-up co-location timing intent for ${coLocationFollowUpIntent.a} and ${coLocationFollowUpIntent.b}${coLocationFollowUpIntent.cellId ? ` at cell ${coLocationFollowUpIntent.cellId}` : ''}. Fetching PresenceEvent timestamps.`,
+    });
+  } else if (coLocationIntent) {
+    candidateQueries = buildCoLocationCandidates(
+      coLocationIntent.a,
+      coLocationIntent.b,
+      coLocationIntent.cellId,
+    );
+    await emit({
+      stage: 'planning_query',
+      message: `Detected co-location intent for ${coLocationIntent.a} and ${coLocationIntent.b}. Using PresenceEvent -> Location evidence with timestamps.`,
+    });
+  } else if (eventsOnDateIntent) {
     candidateQueries = [
       {
         name: 'Events on same date (follow-up deterministic)',
@@ -1029,6 +1241,15 @@ export async function runInvestigationTurn(
     await emit({
       stage: 'planning_query',
       message: `Detected call-activity-by-date intent for ${callOnDateIntent.msisdn} on ${callOnDateIntent.date}. Using safe timestamp-prefix filtering.`,
+    });
+  } else if (phonePhoneIntent) {
+    candidateQueries = buildPhoneToPhoneLinkCandidates(
+      phonePhoneIntent.a,
+      phonePhoneIntent.b,
+    );
+    await emit({
+      stage: 'planning_query',
+      message: `Detected phone-to-phone hidden-link intent between ${phonePhoneIntent.a} and ${phonePhoneIntent.b}. Running multi-strategy path and shared-evidence queries.`,
     });
   } else if (pathIntent) {
     candidateQueries = buildPhoneLocationPathCandidates(

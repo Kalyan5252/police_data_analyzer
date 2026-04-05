@@ -49,6 +49,9 @@ GENERAL SEMANTICS (guidance, may evolve):
 -   - counterpart_numbers relative to queried phone number
 -   - event_imeis via (:CommunicationEvent)-[:USED_DEVICE]->(:Device) when available
 - Avoid answers that claim caller/callee is unknown if initiated/target fields are present in records.
+- For co-location questions ("same place", "same cell", "at what time"), use:
+-   PhoneNumber -[:SEEN_AT]- PresenceEvent -[:AT_LOCATION]- Location
+- and return PresenceEvent timestamps/event_ids for both numbers (not only shared cell_id summary).
 - CommunicationEvent SEEN_AT Location or AT_LOCATION Location via intermediate nodes, depending on ingestion.
 - PhoneNumber USED_DEVICE Device; Device USED IPAddress; Device SEEN_AT Location.
 - Internet activity path (preferred for IPDR-style lookups): PhoneNumber CONNECTED_TO InternetSession CONNECTED_TO IPAddress.
