@@ -148,6 +148,12 @@ function repairCypherTemporalLiterals(cypher: string): string {
     (_m, d: string) => `date('${d}')`,
   );
 
+  // date('YYYY-MM-DD ...anything...') -> date('YYYY-MM-DD')
+  query = query.replace(
+    /date\(\s*'(\d{4}-\d{2}-\d{2})[^']*'\s*\)/gi,
+    (_m, d: string) => `date('${d}')`,
+  );
+
   // date("YYYY-MM-DD ...") -> date('YYYY-MM-DD')
   query = query.replace(
     /date\(\s*"(\d{4}-\d{2}-\d{2})[^"]*"\s*\)/gi,
@@ -315,6 +321,43 @@ function detectReceivedCallsOnDateFollowUpIntent(
   if (!date) return null;
 
   return { msisdn, date };
+}
+
+function detectOtherEventsOnSameDateIntent(
+  userQuery: string,
+  history: ConversationTurn[],
+): { msisdn: string; date: string } | null {
+  const q = userQuery.toLowerCase();
+  const asksEvents = /\bevent\b|\bevents\b|\bactivity\b/.test(q);
+  const asksOther = /\bother\b/.test(q);
+  if (!asksEvents || !asksOther) return null;
+
+  const explicitMsisdn = extractMsisdn(userQuery);
+  const msisdn = explicitMsisdn || extractLatestMsisdnFromHistory(history);
+  if (!msisdn) return null;
+
+  const explicitDate = extractIsoDate(userQuery);
+  const sameDateRef = hasSameDateReference(userQuery);
+  const date =
+    explicitDate ||
+    (sameDateRef ? extractLatestDateFromHistory(history) : null);
+  if (!date) return null;
+
+  return { msisdn, date };
+}
+
+function buildOtherEventsOnDateQuery(msisdn: string, date: string): string {
+  const safeMsisdn = escapeCypherLiteral(msisdn);
+  const safeDate = escapeCypherLiteral(date);
+  return `MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'})-[:INITIATED|TARGET]-(ce:CommunicationEvent)
+WHERE toString(ce.timestamp) STARTS WITH '${safeDate}'
+  AND ce.type IS NOT NULL
+  AND NOT ce.type IN ['CALL-IN', 'CALL-OUT']
+OPTIONAL MATCH (ce)-[:INITIATED|TARGET]-(other:PhoneNumber)
+WHERE other.msisdn <> p.msisdn
+RETURN ce.event_id AS event_id, ce.type AS event_type, ce.timestamp AS event_timestamp, ce.duration AS event_duration, collect(DISTINCT other.msisdn) AS counterpart_numbers
+ORDER BY ce.timestamp ASC
+LIMIT 200`;
 }
 
 type Anchor = {
@@ -914,6 +957,10 @@ export async function runInvestigationTurn(
     stage: 'planning_query',
     message: 'Planning graph query from your natural language request.',
   });
+  const otherEventsIntent = detectOtherEventsOnSameDateIntent(
+    userQuery,
+    options.history ?? [],
+  );
   const receivedFollowUpIntent = detectReceivedCallsOnDateFollowUpIntent(
     userQuery,
     options.history ?? [],
@@ -925,7 +972,22 @@ export async function runInvestigationTurn(
   const ipEventIntent = detectIpToEventIntent(userQuery);
   const genericIntent = detectGenericComplexRelationshipIntent(userQuery);
   let candidateQueries: QueryCandidate[] = [];
-  if (receivedFollowUpIntent) {
+  if (otherEventsIntent) {
+    candidateQueries = [
+      {
+        name: 'Other events on same date (follow-up deterministic)',
+        strategy: 'intermediate_path',
+        cypher: buildOtherEventsOnDateQuery(
+          otherEventsIntent.msisdn,
+          otherEventsIntent.date,
+        ),
+      },
+    ];
+    await emit({
+      stage: 'planning_query',
+      message: `Resolved follow-up context: non-call events for ${otherEventsIntent.msisdn} on ${otherEventsIntent.date}. Using safe timestamp-prefix filtering.`,
+    });
+  } else if (receivedFollowUpIntent) {
     candidateQueries = [
       {
         name: 'Received calls on date (follow-up deterministic)',
