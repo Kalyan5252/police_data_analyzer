@@ -1288,7 +1288,7 @@ export default function AnalyzePage() {
 
       {/* Input Area */}
       <div className="p-6 bg-white border-t border-brand-light/30 shrink-0 relative z-20">
-        {showSuggestions && suggestions.length > 0 && (
+        {showSuggestions && !isProcessing && suggestions.length > 0 && (
           <div className="absolute bottom-full left-0 w-full mb-4 flex justify-start pointer-events-none z-10 px-4 max-w-5xl mx-auto right-0">
             <div className="flex flex-col gap-2 items-start max-w-3xl pointer-events-auto">
               {suggestions.map((suggestion, idx) => (
