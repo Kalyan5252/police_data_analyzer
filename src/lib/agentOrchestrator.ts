@@ -295,9 +295,16 @@ function buildCallActivityOnDateQuery(
   return `MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'})-[:INITIATED|TARGET]-(ce:CommunicationEvent)
 WHERE ce.type IN ${callTypes}
   AND toString(ce.timestamp) STARTS WITH '${safeDate}'
-OPTIONAL MATCH (ce)-[:INITIATED|TARGET]-(other:PhoneNumber)
-WHERE other.msisdn <> p.msisdn
-RETURN ce.event_id AS event_id, ce.type AS event_type, ce.timestamp AS event_timestamp, ce.duration AS event_duration, collect(DISTINCT other.msisdn) AS counterpart_numbers
+OPTIONAL MATCH (src:PhoneNumber)-[:INITIATED]->(ce)
+OPTIONAL MATCH (ce)-[:TARGET]->(dst:PhoneNumber)
+OPTIONAL MATCH (ce)-[:USED_DEVICE]->(dev:Device)
+WITH p, ce,
+  [n IN collect(DISTINCT src.msisdn) WHERE n IS NOT NULL] AS initiated_numbers,
+  [n IN collect(DISTINCT dst.msisdn) WHERE n IS NOT NULL] AS target_numbers,
+  [i IN collect(DISTINCT dev.imei) WHERE i IS NOT NULL] AS event_imeis
+WITH p, ce, initiated_numbers, target_numbers, event_imeis,
+  [n IN (initiated_numbers + target_numbers) WHERE n <> p.msisdn] AS counterpart_numbers
+RETURN ce.event_id AS event_id, ce.type AS event_type, ce.timestamp AS event_timestamp, ce.duration AS event_duration, initiated_numbers, target_numbers, counterpart_numbers, event_imeis
 ORDER BY ce.timestamp ASC
 LIMIT 200`;
 }
@@ -323,14 +330,13 @@ function detectReceivedCallsOnDateFollowUpIntent(
   return { msisdn, date };
 }
 
-function detectOtherEventsOnSameDateIntent(
+function detectEventsOnSameDateFollowUpIntent(
   userQuery: string,
   history: ConversationTurn[],
 ): { msisdn: string; date: string } | null {
   const q = userQuery.toLowerCase();
   const asksEvents = /\bevent\b|\bevents\b|\bactivity\b/.test(q);
-  const asksOther = /\bother\b/.test(q);
-  if (!asksEvents || !asksOther) return null;
+  if (!asksEvents) return null;
 
   const explicitMsisdn = extractMsisdn(userQuery);
   const msisdn = explicitMsisdn || extractLatestMsisdnFromHistory(history);
@@ -346,16 +352,22 @@ function detectOtherEventsOnSameDateIntent(
   return { msisdn, date };
 }
 
-function buildOtherEventsOnDateQuery(msisdn: string, date: string): string {
+function buildEventsOnDateQuery(msisdn: string, date: string): string {
   const safeMsisdn = escapeCypherLiteral(msisdn);
   const safeDate = escapeCypherLiteral(date);
   return `MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'})-[:INITIATED|TARGET]-(ce:CommunicationEvent)
 WHERE toString(ce.timestamp) STARTS WITH '${safeDate}'
   AND ce.type IS NOT NULL
-  AND NOT ce.type IN ['CALL-IN', 'CALL-OUT']
-OPTIONAL MATCH (ce)-[:INITIATED|TARGET]-(other:PhoneNumber)
-WHERE other.msisdn <> p.msisdn
-RETURN ce.event_id AS event_id, ce.type AS event_type, ce.timestamp AS event_timestamp, ce.duration AS event_duration, collect(DISTINCT other.msisdn) AS counterpart_numbers
+OPTIONAL MATCH (src:PhoneNumber)-[:INITIATED]->(ce)
+OPTIONAL MATCH (ce)-[:TARGET]->(dst:PhoneNumber)
+OPTIONAL MATCH (ce)-[:USED_DEVICE]->(dev:Device)
+WITH p, ce,
+  [n IN collect(DISTINCT src.msisdn) WHERE n IS NOT NULL] AS initiated_numbers,
+  [n IN collect(DISTINCT dst.msisdn) WHERE n IS NOT NULL] AS target_numbers,
+  [i IN collect(DISTINCT dev.imei) WHERE i IS NOT NULL] AS event_imeis
+WITH p, ce, initiated_numbers, target_numbers, event_imeis,
+  [n IN (initiated_numbers + target_numbers) WHERE n <> p.msisdn] AS counterpart_numbers
+RETURN ce.event_id AS event_id, ce.type AS event_type, ce.timestamp AS event_timestamp, ce.duration AS event_duration, initiated_numbers, target_numbers, counterpart_numbers, event_imeis
 ORDER BY ce.timestamp ASC
 LIMIT 200`;
 }
@@ -885,7 +897,7 @@ async function synthesizeFinalAnswer(
   const system: LLMMessage = {
     role: 'system',
     content:
-      'You are a senior investigative analyst. You receive multiple model opinions and the underlying graph query and results. Your job is to synthesize them into ONE clear, concise answer for a police officer.\n\nVERY IMPORTANT OUTPUT RULES:\n- Start with a direct answer in 2–4 short sentences.\n- When the user explicitly asks to “show data”, prefer **tables or bullet-point lists of records** instead of long narrative reports.\n- Format output in valid Markdown for UI rendering.\n- When showing a table, use proper GitHub-style markdown table syntax with a header separator row.\n- If the user asks for a flow chart or diagram, output Mermaid inside a fenced block: ```mermaid ... ```.\n- Avoid email-style headers (no To:, From:, Subject:, dates, or greetings like “Hello Officer”).\n- Prefer neutral section headings like “Facts from the Data” only when useful.\n- Prefer statements that are clearly supported by the data.\n- If models disagree, call out the uncertainty and explain which parts are certain vs speculative.\n- Always distinguish facts (directly in the data) from hypotheses.\n- If the data is insufficient for a conclusion, say so and optionally suggest follow-up queries.',
+      'You are a senior investigative analyst. You receive multiple model opinions and the underlying graph query and results. Your job is to synthesize them into ONE clear, concise answer for a police officer.\n\nVERY IMPORTANT OUTPUT RULES:\n- Start with a direct answer in 2–4 short sentences.\n- When the user explicitly asks to “show data”, prefer **tables or bullet-point lists of records** instead of long narrative reports.\n- Format output in valid Markdown for UI rendering.\n- When showing a table, use proper GitHub-style markdown table syntax with a header separator row.\n- If the user asks for a flow chart or diagram, output Mermaid inside a fenced block: ```mermaid ... ```.\n- Avoid email-style headers (no To:, From:, Subject:, dates, or greetings like “Hello Officer”).\n- Prefer neutral section headings like “Facts from the Data” only when useful.\n- Prefer statements that are clearly supported by the data.\n- If records include initiated_numbers/target_numbers/counterpart_numbers/event_imeis, use them explicitly in reasoning.\n- Do NOT claim caller/callee/counterpart is unavailable when those fields are present and non-empty in records.\n- If models disagree, call out the uncertainty and explain which parts are certain vs speculative.\n- Always distinguish facts (directly in the data) from hypotheses.\n- If the data is insufficient for a conclusion, say so and optionally suggest follow-up queries.',
   };
 
   const recordsJson =
@@ -957,7 +969,7 @@ export async function runInvestigationTurn(
     stage: 'planning_query',
     message: 'Planning graph query from your natural language request.',
   });
-  const otherEventsIntent = detectOtherEventsOnSameDateIntent(
+  const eventsOnDateIntent = detectEventsOnSameDateFollowUpIntent(
     userQuery,
     options.history ?? [],
   );
@@ -972,20 +984,20 @@ export async function runInvestigationTurn(
   const ipEventIntent = detectIpToEventIntent(userQuery);
   const genericIntent = detectGenericComplexRelationshipIntent(userQuery);
   let candidateQueries: QueryCandidate[] = [];
-  if (otherEventsIntent) {
+  if (eventsOnDateIntent) {
     candidateQueries = [
       {
-        name: 'Other events on same date (follow-up deterministic)',
+        name: 'Events on same date (follow-up deterministic)',
         strategy: 'intermediate_path',
-        cypher: buildOtherEventsOnDateQuery(
-          otherEventsIntent.msisdn,
-          otherEventsIntent.date,
+        cypher: buildEventsOnDateQuery(
+          eventsOnDateIntent.msisdn,
+          eventsOnDateIntent.date,
         ),
       },
     ];
     await emit({
       stage: 'planning_query',
-      message: `Resolved follow-up context: non-call events for ${otherEventsIntent.msisdn} on ${otherEventsIntent.date}. Using safe timestamp-prefix filtering.`,
+      message: `Resolved follow-up context: events for ${eventsOnDateIntent.msisdn} on ${eventsOnDateIntent.date}. Fetching communication events with linked parties and device evidence.`,
     });
   } else if (receivedFollowUpIntent) {
     candidateQueries = [

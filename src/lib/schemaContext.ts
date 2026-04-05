@@ -43,6 +43,12 @@ GENERAL SEMANTICS (guidance, may evolve):
 -   - The number linked via :INITIATED is the initiator/caller party.
 -   - The number linked via :TARGET is the target/callee party.
 -   - If Device is linked as (ce:CommunicationEvent)-[:USED_DEVICE]->(d:Device), treat that device/IMEI as belonging to the INITIATED side for that event, not automatically to TARGET.
+- When returning CommunicationEvent records, ALWAYS try to include linked party context:
+-   - initiated_numbers (PhoneNumber via :INITIATED)
+-   - target_numbers (PhoneNumber via :TARGET)
+-   - counterpart_numbers relative to queried phone number
+-   - event_imeis via (:CommunicationEvent)-[:USED_DEVICE]->(:Device) when available
+- Avoid answers that claim caller/callee is unknown if initiated/target fields are present in records.
 - CommunicationEvent SEEN_AT Location or AT_LOCATION Location via intermediate nodes, depending on ingestion.
 - PhoneNumber USED_DEVICE Device; Device USED IPAddress; Device SEEN_AT Location.
 - Internet activity path (preferred for IPDR-style lookups): PhoneNumber CONNECTED_TO InternetSession CONNECTED_TO IPAddress.
