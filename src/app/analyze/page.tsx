@@ -132,14 +132,30 @@ function createInitialOperation(kind: 'agent' | 'cypher'): OperationState {
         ? [
             { key: 'plan', label: 'Agent planning query', status: 'active' },
             { key: 'fetch', label: 'Fetching graph data', status: 'pending' },
-            { key: 'models', label: 'Calling analysis models', status: 'pending' },
-            { key: 'synthesize', label: 'Generating final response', status: 'pending' },
+            {
+              key: 'models',
+              label: 'Calling analysis models',
+              status: 'pending',
+            },
+            {
+              key: 'synthesize',
+              label: 'Generating final response',
+              status: 'pending',
+            },
           ]
         : [
             { key: 'plan', label: 'Validating query', status: 'active' },
             { key: 'fetch', label: 'Fetching graph data', status: 'pending' },
-            { key: 'models', label: 'Preparing result format', status: 'pending' },
-            { key: 'synthesize', label: 'Publishing response', status: 'pending' },
+            {
+              key: 'models',
+              label: 'Preparing result format',
+              status: 'pending',
+            },
+            {
+              key: 'synthesize',
+              label: 'Publishing response',
+              status: 'pending',
+            },
           ],
     logs: [
       kind === 'agent'
@@ -168,7 +184,11 @@ function applyProgressEvent(
   current: OperationState,
   event: AgentProgressEvent,
 ): OperationState {
-  const next = { ...current, steps: [...current.steps], logs: [...current.logs] };
+  const next = {
+    ...current,
+    steps: [...current.steps],
+    logs: [...current.logs],
+  };
 
   switch (event.stage) {
     case 'started': {
@@ -274,7 +294,9 @@ function getSuggestions(messages: Message[]): string[] {
 
   if (lastSystem) {
     suggestions.push('Show the latest findings as a compact table.');
-    suggestions.push('Create a flowchart of entity relationships from this output.');
+    suggestions.push(
+      'Create a flowchart of entity relationships from this output.',
+    );
   }
 
   if (lastUser?.content) {
@@ -287,24 +309,26 @@ function getSuggestions(messages: Message[]): string[] {
     }
 
     if (/transaction|debit|credit|bank/i.test(q)) {
-      suggestions.push('Identify suspicious debit patterns above normal baseline.');
+      suggestions.push(
+        'Identify suspicious debit patterns above normal baseline.',
+      );
     } else if (/phone|imei|ipdr|location/i.test(q)) {
       suggestions.push('Highlight top 5 numbers by connection frequency.');
     } else {
-      suggestions.push('Summarize key facts vs hypotheses from the last response.');
+      suggestions.push(
+        'Summarize key facts vs hypotheses from the last response.',
+      );
     }
   }
 
   suggestions.push('What should I investigate next based on this result?');
 
-  return Array.from(new Set(suggestions)).slice(0, 5);
+  return Array.from(new Set(suggestions)).slice(0, 3);
 }
 
 function detectRequestedExportFormat(query: string): ExportFormat | null {
   const q = query.toLowerCase();
-  if (
-    !/(export|download|file|excel|xlsx|csv|pdf|sheet|report)/i.test(query)
-  ) {
+  if (!/(export|download|file|excel|xlsx|csv|pdf|sheet|report)/i.test(query)) {
     return null;
   }
   if (/\bexcel\b|\bxlsx\b|\bsheet\b/.test(q)) return 'xlsx';
@@ -405,6 +429,7 @@ export default function AnalyzePage() {
   const [operationState, setOperationState] = useState<OperationState | null>(
     null,
   );
+  const [showSuggestions, setShowSuggestions] = useState(true);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -435,9 +460,12 @@ export default function AnalyzePage() {
   };
 
   const loadCaseMessages = async (caseId: string) => {
-    const res = await fetch(`/api/cases/${encodeURIComponent(caseId)}/messages`, {
-      cache: 'no-store',
-    });
+    const res = await fetch(
+      `/api/cases/${encodeURIComponent(caseId)}/messages`,
+      {
+        cache: 'no-store',
+      },
+    );
     const data = await res.json();
     if (!res.ok || !data.success || !Array.isArray(data.messages)) {
       throw new Error(data.error || 'Failed to load case messages.');
@@ -483,11 +511,15 @@ export default function AnalyzePage() {
           const latestCase = await getLatestCase();
           if (latestCase?.caseId) {
             selectedCaseId = latestCase.caseId;
-            router.replace(`/analyze?case=${encodeURIComponent(latestCase.caseId)}`);
+            router.replace(
+              `/analyze?case=${encodeURIComponent(latestCase.caseId)}`,
+            );
           } else {
             const created = await createCaseIfMissing();
             selectedCaseId = created.caseId;
-            router.replace(`/analyze?case=${encodeURIComponent(created.caseId)}`);
+            router.replace(
+              `/analyze?case=${encodeURIComponent(created.caseId)}`,
+            );
           }
         }
         if (!selectedCaseId || ignore) return;
@@ -617,7 +649,10 @@ export default function AnalyzePage() {
           const next = { ...prev };
           next.steps = updateStepStatus(next.steps, 'plan', 'done');
           next.steps = updateStepStatus(next.steps, 'fetch', 'active');
-          next.logs = appendLog(next.logs, 'Neo4j query execution in progress.');
+          next.logs = appendLog(
+            next.logs,
+            'Neo4j query execution in progress.',
+          );
           return next;
         });
 
@@ -636,7 +671,10 @@ export default function AnalyzePage() {
               ...prev,
               steps: prev.steps.map((s) => ({ ...s, status: 'done' })),
               logs: appendLog(prev.logs, 'Result formatted and ready.'),
-              recordPreview: (data.records as Record<string, unknown>[]).slice(0, 3),
+              recordPreview: (data.records as Record<string, unknown>[]).slice(
+                0,
+                3,
+              ),
             };
           });
 
@@ -753,22 +791,22 @@ export default function AnalyzePage() {
               candidateQueries: payload.candidateQueries,
               queryEvaluation: payload.queryEvaluation,
               modelResponses: payload.modelResponses,
-          exportRequest:
-            requestedExportFormat && payload.records?.length
-              ? {
-                  format: requestedExportFormat,
-                  mode: requestedExportMode,
-                  baseName: 'investigation_export',
-                  label:
-                    requestedExportMode === 'detailed'
-                      ? `Download ${requestedExportFormat.toUpperCase()} (Detailed)`
-                      : `Download ${requestedExportFormat.toUpperCase()}`,
-                  query: userQuery,
-                  explanation: payload.finalAnswer,
-                  cypher: payload.cypher,
-                }
-              : undefined,
-        };
+              exportRequest:
+                requestedExportFormat && payload.records?.length
+                  ? {
+                      format: requestedExportFormat,
+                      mode: requestedExportMode,
+                      baseName: 'investigation_export',
+                      label:
+                        requestedExportMode === 'detailed'
+                          ? `Download ${requestedExportFormat.toUpperCase()} (Detailed)`
+                          : `Download ${requestedExportFormat.toUpperCase()}`,
+                      query: userQuery,
+                      explanation: payload.finalAnswer,
+                      cypher: payload.cypher,
+                    }
+                  : undefined,
+            };
 
             setMessages((prev) => [...prev, newSystemMsg]);
             void persistMessage(activeCaseId, newSystemMsg).then(() =>
@@ -834,7 +872,9 @@ export default function AnalyzePage() {
               <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
                 Case
               </span>
-              <span className="text-xs font-semibold">{activeCaseId.slice(0, 8)}</span>
+              <span className="text-xs font-semibold">
+                {activeCaseId.slice(0, 8)}
+              </span>
             </div>
           )}
           <div className="flex items-center gap-2 px-3 py-1.5 bg-brand-light/10 text-brand-dark rounded-md border border-brand-light/30">
@@ -939,30 +979,35 @@ export default function AnalyzePage() {
                       content={msg.content}
                     />
                   )}
-                  {msg.exportRequest && msg.records && msg.records.length > 0 && (
-                    <div className="mt-3">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void downloadRecordsAsFile(
-                            msg.records as Record<string, unknown>[],
-                            msg.exportRequest?.format as ExportFormat,
-                            msg.exportRequest?.baseName || 'investigation_export',
-                            {
-                              mode: msg.exportRequest?.mode || 'records',
-                              query: msg.exportRequest?.query || '',
-                              explanation: msg.exportRequest?.explanation || '',
-                              cypher: msg.exportRequest?.cypher || msg.cypher || '',
-                            },
-                          )
-                        }
-                        className="inline-flex items-center gap-2 rounded-md border border-brand-light/40 bg-white px-3 py-1.5 text-xs font-semibold text-brand-dark hover:bg-brand-light/10 transition-colors"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        {msg.exportRequest.label}
-                      </button>
-                    </div>
-                  )}
+                  {msg.exportRequest &&
+                    msg.records &&
+                    msg.records.length > 0 && (
+                      <div className="mt-3">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void downloadRecordsAsFile(
+                              msg.records as Record<string, unknown>[],
+                              msg.exportRequest?.format as ExportFormat,
+                              msg.exportRequest?.baseName ||
+                                'investigation_export',
+                              {
+                                mode: msg.exportRequest?.mode || 'records',
+                                query: msg.exportRequest?.query || '',
+                                explanation:
+                                  msg.exportRequest?.explanation || '',
+                                cypher:
+                                  msg.exportRequest?.cypher || msg.cypher || '',
+                              },
+                            )
+                          }
+                          className="inline-flex items-center gap-2 rounded-md border border-brand-light/40 bg-white px-3 py-1.5 text-xs font-semibold text-brand-dark hover:bg-brand-light/10 transition-colors"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          {msg.exportRequest.label}
+                        </button>
+                      </div>
+                    )}
 
                   {msg.role === 'system' &&
                     (msg.cypher ||
@@ -985,28 +1030,30 @@ export default function AnalyzePage() {
                           </details>
                         )}
 
-                        {msg.candidateQueries && msg.candidateQueries.length > 0 && (
-                          <details className="group rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
-                            <summary className="flex cursor-pointer items-center justify-between text-slate-600 font-semibold">
-                              <span>
-                                Candidate Cypher Strategies ({msg.candidateQueries.length})
-                              </span>
-                              <span className="text-[10px] uppercase tracking-wide text-slate-400">
-                                VIEW
-                              </span>
-                            </summary>
-                            <div className="mt-2 space-y-2">
-                              {msg.candidateQueries.map((candidate, idx) => (
-                                <pre
-                                  key={`${msg.id}-candidate-${idx}`}
-                                  className="whitespace-pre-wrap rounded bg-slate-900/90 p-2 font-mono text-[11px] text-slate-100"
-                                >
-                                  {candidate}
-                                </pre>
-                              ))}
-                            </div>
-                          </details>
-                        )}
+                        {msg.candidateQueries &&
+                          msg.candidateQueries.length > 0 && (
+                            <details className="group rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                              <summary className="flex cursor-pointer items-center justify-between text-slate-600 font-semibold">
+                                <span>
+                                  Candidate Cypher Strategies (
+                                  {msg.candidateQueries.length})
+                                </span>
+                                <span className="text-[10px] uppercase tracking-wide text-slate-400">
+                                  VIEW
+                                </span>
+                              </summary>
+                              <div className="mt-2 space-y-2">
+                                {msg.candidateQueries.map((candidate, idx) => (
+                                  <pre
+                                    key={`${msg.id}-candidate-${idx}`}
+                                    className="whitespace-pre-wrap rounded bg-slate-900/90 p-2 font-mono text-[11px] text-slate-100"
+                                  >
+                                    {candidate}
+                                  </pre>
+                                ))}
+                              </div>
+                            </details>
+                          )}
 
                         {msg.cypher && (
                           <details className="group rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
@@ -1072,7 +1119,9 @@ export default function AnalyzePage() {
                                           <tr
                                             key={idx}
                                             className={
-                                              idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'
+                                              idx % 2 === 0
+                                                ? 'bg-white'
+                                                : 'bg-slate-50'
                                             }
                                           >
                                             {keys.map((k) => (
@@ -1098,36 +1147,39 @@ export default function AnalyzePage() {
                           </details>
                         )}
 
-                        {msg.modelResponses && msg.modelResponses.length > 0 && (
-                          <details className="group rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
-                            <summary className="flex cursor-pointer items-center justify-between text-slate-600 font-semibold">
-                              <span>Model Opinions ({msg.modelResponses.length})</span>
-                              <span className="text-[10px] uppercase tracking-wide text-slate-400">
-                                VIEW
-                              </span>
-                            </summary>
-                            <div className="mt-2 space-y-2">
-                              {msg.modelResponses.map((opinion, idx) => (
-                                <details
-                                  key={`${opinion.provider}-${idx}`}
-                                  className="rounded border border-slate-200 bg-white px-3 py-2"
-                                >
-                                  <summary className="flex cursor-pointer items-center justify-between text-[11px] font-semibold text-slate-700">
-                                    <span>
-                                      {opinion.provider} - {opinion.model}
-                                    </span>
-                                    <span className="text-[9px] uppercase tracking-wide text-slate-400">
-                                      EXPAND
-                                    </span>
-                                  </summary>
-                                  <div className="mt-1 whitespace-pre-wrap font-mono text-[11px] text-slate-800">
-                                    {opinion.content}
-                                  </div>
-                                </details>
-                              ))}
-                            </div>
-                          </details>
-                        )}
+                        {msg.modelResponses &&
+                          msg.modelResponses.length > 0 && (
+                            <details className="group rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                              <summary className="flex cursor-pointer items-center justify-between text-slate-600 font-semibold">
+                                <span>
+                                  Model Opinions ({msg.modelResponses.length})
+                                </span>
+                                <span className="text-[10px] uppercase tracking-wide text-slate-400">
+                                  VIEW
+                                </span>
+                              </summary>
+                              <div className="mt-2 space-y-2">
+                                {msg.modelResponses.map((opinion, idx) => (
+                                  <details
+                                    key={`${opinion.provider}-${idx}`}
+                                    className="rounded border border-slate-200 bg-white px-3 py-2"
+                                  >
+                                    <summary className="flex cursor-pointer items-center justify-between text-[11px] font-semibold text-slate-700">
+                                      <span>
+                                        {opinion.provider} - {opinion.model}
+                                      </span>
+                                      <span className="text-[9px] uppercase tracking-wide text-slate-400">
+                                        EXPAND
+                                      </span>
+                                    </summary>
+                                    <div className="mt-1 whitespace-pre-wrap font-mono text-[11px] text-slate-800">
+                                      {opinion.content}
+                                    </div>
+                                  </details>
+                                ))}
+                              </div>
+                            </details>
+                          )}
                       </div>
                     )}
                 </div>
@@ -1179,17 +1231,27 @@ export default function AnalyzePage() {
                         <table className="min-w-full text-[11px] border-collapse">
                           <thead className="bg-slate-100">
                             <tr>
-                              {Object.keys(operationState.recordPreview[0]).map((k) => (
-                                <th key={k} className="px-2 py-1 text-left border-b border-slate-200">
-                                  {k}
-                                </th>
-                              ))}
+                              {Object.keys(operationState.recordPreview[0]).map(
+                                (k) => (
+                                  <th
+                                    key={k}
+                                    className="px-2 py-1 text-left border-b border-slate-200"
+                                  >
+                                    {k}
+                                  </th>
+                                ),
+                              )}
                             </tr>
                           </thead>
                           <tbody>
                             {operationState.recordPreview.map((row, idx) => (
-                              <tr key={idx} className={idx % 2 ? 'bg-slate-50' : 'bg-white'}>
-                                {Object.keys(operationState.recordPreview?.[0] ?? {}).map((k) => (
+                              <tr
+                                key={idx}
+                                className={idx % 2 ? 'bg-slate-50' : 'bg-white'}
+                              >
+                                {Object.keys(
+                                  operationState.recordPreview?.[0] ?? {},
+                                ).map((k) => (
                                   <td
                                     key={k}
                                     className="px-2 py-1 border-b border-slate-100 text-slate-700"
@@ -1225,22 +1287,35 @@ export default function AnalyzePage() {
       </div>
 
       {/* Input Area */}
-      <div className="p-6 bg-white border-t border-brand-light/30 shrink-0">
-        <div className="max-w-5xl mx-auto mb-3 flex flex-wrap gap-2">
-          {suggestions.map((suggestion, idx) => (
-            <button
-              key={suggestion}
-              type="button"
-              onClick={() => setInput(suggestion)}
-              className="suggestion-chip"
-              style={{ animationDelay: `${idx * 70}ms` }}
-            >
-              {suggestion}
-            </button>
-          ))}
-        </div>
+      <div className="p-6 bg-white border-t border-brand-light/30 shrink-0 relative z-20">
+        {showSuggestions && suggestions.length > 0 && (
+          <div className="absolute bottom-full left-0 w-full mb-4 flex justify-start pointer-events-none z-10 px-4 max-w-5xl mx-auto right-0">
+            <div className="flex flex-col gap-2 items-start max-w-3xl pointer-events-auto">
+              {suggestions.map((suggestion, idx) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  onClick={() => setInput(suggestion)}
+                  className="bg-white/95 backdrop-blur-xl border border-brand-light/40 shadow-sm text-slate-800 px-5 py-2.5 rounded-2xl text-[13px] font-medium hover:bg-slate-50 transition-all duration-300 transform opacity-0 animate-fade-in-up text-left max-w-full truncate hover:shadow-md hover:-translate-y-0.5"
+                  style={{
+                    animationDelay: `${idx * 70}ms`,
+                    animationFillMode: 'forwards',
+                  }}
+                >
+                  <span className="bg-linear-to-r from-brand-dark to-brand-light bg-clip-text text-transparent mr-2 font-bold shrink-0">
+                    ✦
+                  </span>
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
-        <form onSubmit={handleSend} className="max-w-5xl mx-auto flex items-end gap-4">
+        <form
+          onSubmit={handleSend}
+          className="max-w-5xl mx-auto flex items-end gap-4 relative z-20"
+        >
           <div className="flex-1 border-2 border-brand-light/50 rounded-xl overflow-hidden focus-within:border-brand-dark focus-within:ring-4 focus-within:ring-brand-light/20 transition-all bg-slate-50 relative">
             <div className="absolute top-4 left-4 text-slate-400">
               <Search className="w-5 h-5" />
@@ -1262,18 +1337,39 @@ export default function AnalyzePage() {
           </div>
           <button
             type="submit"
-            disabled={!input.trim() || isProcessing || isCaseLoading || !activeCaseId}
+            disabled={
+              !input.trim() || isProcessing || isCaseLoading || !activeCaseId
+            }
             className="shrink-0 h-[68px] px-8 bg-brand-dark text-white font-medium rounded-xl hover:bg-brand-dark/90 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-md flex items-center gap-3"
           >
             <span>Execute</span>
             <ArrowRight className="w-5 h-5" />
           </button>
         </form>
-        <div className="text-center mt-3">
-          <p className="text-xs text-slate-400 font-medium flex items-center justify-center gap-1.5">
+        <div className="flex justify-between items-center max-w-5xl mx-auto mt-3">
+          <p className="text-xs text-slate-400 font-medium flex items-center gap-1.5">
             <FileText className="w-3.5 h-3.5" />
             All queries are logged in the central investigation registry.
           </p>
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-slate-400 font-semibold uppercase tracking-wider">
+              AI Suggestions
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowSuggestions(!showSuggestions)}
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-300 ease-in-out focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-dark focus-visible:ring-offset-2 focus-visible:ring-offset-white ${
+                showSuggestions ? 'bg-brand-dark/90' : 'bg-slate-200'
+              }`}
+            >
+              <span className="sr-only">Toggle AI suggestions</span>
+              <span
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-300 ease-in-out ${
+                  showSuggestions ? 'translate-x-4' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
         </div>
       </div>
     </div>
