@@ -583,50 +583,115 @@ function hasSameDateReference(userQuery: string): boolean {
   return /\bsame date\b|\bthat date\b|\bsame day\b/i.test(userQuery);
 }
 
-function detectCallActivityOnDateIntent(
+function detectCallActivityIntent(
   userQuery: string,
-): { msisdn: string; date: string } | null {
+  history: ConversationTurn[],
+): { msisdn: string; date?: string; direction: 'all' | 'received' | 'outgoing' } | null {
   const q = userQuery.toLowerCase();
   const asksCallActivity =
     q.includes('call activity') ||
     q.includes('call details') ||
-    (q.includes('call') && q.includes('activity'));
+    /\bcalls\b/.test(q);
   if (!asksCallActivity) return null;
 
-  const msisdn = extractMsisdn(userQuery);
-  const date = extractIsoDate(userQuery);
-  if (!msisdn || !date) return null;
-  return { msisdn, date };
+  const msisdn = extractMsisdn(userQuery) || extractLatestMsisdnFromHistory(history);
+  if (!msisdn) return null;
+
+  const explicitDate = extractIsoDate(userQuery);
+  const sameDateRef = hasSameDateReference(userQuery);
+  const date =
+    explicitDate || (sameDateRef ? extractLatestDateFromHistory(history) : null) || undefined;
+
+  const direction: 'all' | 'received' | 'outgoing' = /\breceived\b|\bincoming\b/.test(q)
+    ? 'received'
+    : /\boutgoing\b|\bmade\b|\bdialed\b/.test(q)
+      ? 'outgoing'
+      : 'all';
+
+  return { msisdn, date, direction };
 }
 
-function buildCallActivityOnDateQuery(
+function buildCallActivityMergedQuery(
   msisdn: string,
-  date: string,
+  date?: string,
   mode: 'all' | 'received' | 'outgoing' = 'all',
 ): string {
   const safeMsisdn = escapeCypherLiteral(msisdn);
-  const safeDate = escapeCypherLiteral(date);
-  const callTypes =
+  const safeDate = date ? escapeCypherLiteral(date) : '';
+  const dateSerial = date ? isoDateToExcelSerial(date) : null;
+
+  const ceDateFilter = date
+    ? `AND toString(ce.timestamp) STARTS WITH '${safeDate}'`
+    : '';
+  const peDateFilter = date
+    ? `AND (
+  toString(coalesce(pe.timestamp, pe.time_stamp)) STARTS WITH '${safeDate}'
+  ${dateSerial ? `OR toString(coalesce(pe.timestamp, pe.time_stamp)) STARTS WITH '${dateSerial}'` : ''}
+)`
+    : '';
+  const ceDirFilter =
     mode === 'received'
-      ? "['CALL-IN']"
+      ? "AND toUpper(coalesce(ce.type, '')) STARTS WITH 'CALL-IN'"
       : mode === 'outgoing'
-        ? "['CALL-OUT']"
-        : "['CALL-IN', 'CALL-OUT']";
-  return `MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'})-[:INITIATED|TARGET]-(ce:CommunicationEvent)
-WHERE ce.type IN ${callTypes}
-  AND toString(ce.timestamp) STARTS WITH '${safeDate}'
+        ? "AND toUpper(coalesce(ce.type, '')) STARTS WITH 'CALL-OUT'"
+        : '';
+  const peDirFilter =
+    mode === 'received'
+      ? "AND toUpper(coalesce(pe.type, '')) STARTS WITH 'CALL-IN'"
+      : mode === 'outgoing'
+        ? "AND toUpper(coalesce(pe.type, '')) STARTS WITH 'CALL-OUT'"
+        : '';
+
+  return `MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'})
+MATCH (p)-[:INITIATED|TARGET]-(ce:CommunicationEvent)
+WHERE ce.event_id IS NOT NULL
+  AND toUpper(coalesce(ce.type, '')) STARTS WITH 'CALL-'
+  ${ceDirFilter}
+  ${ceDateFilter}
+WITH p, ce
 OPTIONAL MATCH (src:PhoneNumber)-[:INITIATED]->(ce)
+WITH p, ce, collect(DISTINCT src.msisdn) AS initiated_numbers
 OPTIONAL MATCH (ce)-[:TARGET]->(dst:PhoneNumber)
+WITH p, ce, initiated_numbers, collect(DISTINCT dst.msisdn) AS target_numbers
 OPTIONAL MATCH (ce)-[:USED_DEVICE]->(dev:Device)
-WITH p, ce,
-  [n IN collect(DISTINCT src.msisdn) WHERE n IS NOT NULL] AS initiated_numbers,
-  [n IN collect(DISTINCT dst.msisdn) WHERE n IS NOT NULL] AS target_numbers,
-  [i IN collect(DISTINCT dev.imei) WHERE i IS NOT NULL] AS event_imeis
-WITH p, ce, initiated_numbers, target_numbers, event_imeis,
-  [n IN (initiated_numbers + target_numbers) WHERE n <> p.msisdn] AS counterpart_numbers
-RETURN ce.event_id AS event_id, ce.type AS event_type, ce.timestamp AS event_timestamp, ce.duration AS event_duration, initiated_numbers, target_numbers, counterpart_numbers, event_imeis
-ORDER BY ce.timestamp ASC
-LIMIT 200`;
+WITH
+  p,
+  ce,
+  initiated_numbers,
+  target_numbers,
+  collect(DISTINCT dev.imei) AS event_imeis
+RETURN
+  'communication' AS source,
+  ce.event_id AS communication_event_id,
+  NULL AS presence_event_id,
+  ce.type AS event_type,
+  replace(toString(ce.timestamp), ' 00:00:00 ', ' ') AS event_timestamp,
+  ce.duration AS event_duration,
+  [n IN initiated_numbers WHERE n IS NOT NULL] AS initiated_numbers,
+  [n IN target_numbers WHERE n IS NOT NULL] AS target_numbers,
+  [n IN (initiated_numbers + target_numbers) WHERE n IS NOT NULL AND n <> p.msisdn] AS counterpart_numbers,
+  [i IN event_imeis WHERE i IS NOT NULL] AS event_imeis,
+  NULL AS cell_id
+UNION ALL
+MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'})-[:SEEN_AT]-(pe:PresenceEvent)-[:AT_LOCATION]-(loc:Location)
+WHERE pe.event_id IS NOT NULL
+  AND toUpper(coalesce(pe.type, '')) STARTS WITH 'CALL-'
+  ${peDirFilter}
+  ${peDateFilter}
+RETURN
+  'presence' AS source,
+  NULL AS communication_event_id,
+  pe.event_id AS presence_event_id,
+  pe.type AS event_type,
+  replace(toString(coalesce(pe.timestamp, pe.time_stamp)), ' 00:00:00 ', ' ') AS event_timestamp,
+  pe.duration AS event_duration,
+  [] AS initiated_numbers,
+  [] AS target_numbers,
+  [] AS counterpart_numbers,
+  [] AS event_imeis,
+  loc.cell_id AS cell_id
+ORDER BY event_timestamp ASC
+LIMIT 300`;
 }
 
 function detectReceivedCallsOnDateFollowUpIntent(
@@ -1416,8 +1481,11 @@ export async function runInvestigationTurn(
     userQuery,
     options.history ?? [],
   );
+  const callActivityIntent = detectCallActivityIntent(
+    userQuery,
+    options.history ?? [],
+  );
   const phonePhoneIntent = detectPhoneToPhoneLinkIntent(userQuery);
-  const callOnDateIntent = detectCallActivityOnDateIntent(userQuery);
   const pathIntent = detectPhoneToLocationPathIntent(userQuery);
   const imeiIntent = detectPhoneToImeiIntent(userQuery);
   const phoneIpIntent = detectPhoneToIpIntent(userQuery);
@@ -1504,9 +1572,9 @@ export async function runInvestigationTurn(
   } else if (receivedFollowUpIntent) {
     candidateQueries = [
       {
-        name: 'Received calls on date (follow-up deterministic)',
+        name: 'Received call activity (merged communication + presence)',
         strategy: 'intermediate_path',
-        cypher: buildCallActivityOnDateQuery(
+        cypher: buildCallActivityMergedQuery(
           receivedFollowUpIntent.msisdn,
           receivedFollowUpIntent.date,
           'received',
@@ -1517,20 +1585,21 @@ export async function runInvestigationTurn(
       stage: 'planning_query',
       message: `Resolved follow-up context: received calls for ${receivedFollowUpIntent.msisdn} on ${receivedFollowUpIntent.date}. Using safe timestamp-prefix filtering.`,
     });
-  } else if (callOnDateIntent) {
+  } else if (callActivityIntent) {
     candidateQueries = [
       {
-        name: 'Call activity on date (deterministic)',
+        name: 'Call activity (merged communication + presence)',
         strategy: 'intermediate_path',
-        cypher: buildCallActivityOnDateQuery(
-          callOnDateIntent.msisdn,
-          callOnDateIntent.date,
+        cypher: buildCallActivityMergedQuery(
+          callActivityIntent.msisdn,
+          callActivityIntent.date,
+          callActivityIntent.direction,
         ),
       },
     ];
     await emit({
       stage: 'planning_query',
-      message: `Detected call-activity-by-date intent for ${callOnDateIntent.msisdn} on ${callOnDateIntent.date}. Using safe timestamp-prefix filtering.`,
+      message: `Detected call activity intent for ${callActivityIntent.msisdn}${callActivityIntent.date ? ` on ${callActivityIntent.date}` : ''}. Fetching and merging CommunicationEvent + PresenceEvent evidence.`,
     });
   } else if (phonePhoneIntent) {
     candidateQueries = buildPhoneToPhoneLinkCandidates(
