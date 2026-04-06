@@ -1,0 +1,893 @@
+{
+  "generatedAt": "2026-04-06T08:57:52.555Z",
+  "judgeModel": "gpt-5-mini",
+  "baseUrl": "http://localhost:3000",
+  "casesFile": "tests/llm-judge/cases.extended.json",
+  "caseId": null,
+  "summary": [
+    {
+      "model": "openai/gpt-4o-mini",
+      "n": 15,
+      "avg_overall_100": 86.67,
+      "pass_rate": 0.8,
+      "avg_factual_grounding": 4.067,
+      "avg_schema_reasoning": 4.2,
+      "avg_query_alignment": 4.667,
+      "avg_completeness": 4.267,
+      "avg_clarity_actionability": 4.467
+    },
+    {
+      "model": "groq/llama-3.3-70b-versatile",
+      "n": 15,
+      "avg_overall_100": 88.53,
+      "pass_rate": 0.9333,
+      "avg_factual_grounding": 4.133,
+      "avg_schema_reasoning": 4.667,
+      "avg_query_alignment": 4.733,
+      "avg_completeness": 3.867,
+      "avg_clarity_actionability": 4.733
+    }
+  ],
+  "results": [
+    {
+      "caseName": "Call activity day",
+      "query": "call activity of 9542311767 on 2025-04-01",
+      "cypher": "MATCH (p:PhoneNumber {msisdn: '9542311767'})-[:INITIATED|TARGET]-(ce:CommunicationEvent)\nWHERE toString(ce.timestamp) STARTS WITH '2025-04-01'\n  AND ce.type IS NOT NULL\nOPTIONAL MATCH (src:PhoneNumber)-[:INITIATED]->(ce)\nOPTIONAL MATCH (ce)-[:TARGET]->(dst:PhoneNumber)\nOPTIONAL MATCH (ce)-[:USED_DEVICE]->(dev:Device)\nWITH p, ce,\n  [n IN collect(DISTINCT src.msisdn) WHERE n IS NOT NULL] AS initiated_numbers,\n  [n IN collect(DISTINCT dst.msisdn) WHERE n IS NOT NULL] AS target_numbers,\n  [i IN collect(DISTINCT dev.imei) WHERE i IS NOT NULL] AS event_imeis\nWITH p, ce, initiated_numbers, target_numbers, event_imeis,\n  [n IN (initiated_numbers + target_numbers) WHERE n <> p.msisdn] AS counterpart_numbers\nRETURN ce.event_id AS event_id, ce.type AS event_type, ce.timestamp AS event_timestamp, ce.duration AS event_duration, initiated_numbers, target_numbers, counterpart_numbers, event_imeis\nORDER BY ce.timestamp ASC\nLIMIT 200",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 1,
+              "schema_reasoning": 3,
+              "query_alignment": 4,
+              "completeness": 2,
+              "clarity_actionability": 3
+            },
+            "overall_score_100": 52,
+            "errors": [
+              "Underreports total events: response says 12 events but the raw records slice contains 20 events.",
+              "Incorrect counts by type: claims 4 CALL-IN / 7 CALL-OUT / 3 SMS-IN but raw data shows different counts (e.g., at least 5 CALL-IN and ~11 CALL-OUT in the slice).",
+              "Introduces an invented event (01cc4117-402f-4701-889c-6691f556064b) and counterpart 9030208717 not present in the provided records.",
+              "Incorrect time range: states events occurred up to 15:10:40 although the latest timestamp in the provided slice is 14:24:50 (event 6385baeb).",
+              "Omits several records that are present in the slice (examples: 9708fbb8-ee2d-431b-b2a3-3b7117b0db59, 16698304-bd8d-4751-b845-3715b05de11b, 6385baeb-6022-4424-b6e0-cc9f02e74c35)."
+            ],
+            "strengths": [
+              "Extracts many individual event details correctly (e.g., aa87c9b8, 74415444, 772cf5da with correct timestamps/durations/counterparts).",
+              "Presents results in a clear, structured format that is easy for an investigator to read.",
+              "Highlights useful observations and actionable next steps (geolocation, context, historical records).",
+              "Correctly identifies the longest call duration (182 seconds) and notes repeated contacts."
+            ],
+            "rationale": "The candidate response is well-formatted and largely aligns with the user's intent (summarizing call/SMS activity for the given number and date), but it makes several concrete factual errors relative to the provided records. It undercounts total events, misstates the breakdown by event type, invents at least one event and an endpoint timestamp beyond the supplied data, and omits multiple records present in the slice. Schema reasoning is mixed: the response generally uses the initiated/target/counterpart concept correctly for many events, but the incorrect counts and fabricated record reduce trust. Clarity is good and the suggested next steps are useful, so the output remains somewhat actionable despite the factual problems. The score reflects accurate presentation and helpfulness tempered by significant factual inaccuracies and incomplete coverage of the provided records.",
+            "verdict": "fail"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 3,
+              "schema_reasoning": 4,
+              "query_alignment": 3,
+              "completeness": 3,
+              "clarity_actionability": 4
+            },
+            "overall_score_100": 68,
+            "errors": [
+              "Incorrect time range: reports events between 08:40:27 and 15:10:40, but the provided records end at 14:24:50.",
+              "Omitted several counterpart identifiers present in the records (CP-EMELDS, AX-MPLPRO, AX-FREOYN, AA-AIRTEL).",
+              "Did not enumerate or count call-specific activity separately (user asked for call activity); response mixes calls and SMS without clear call-only summary.",
+              "No explicit verification of event count or per-type counts against the returned records."
+            ],
+            "strengths": [
+              "Correctly identified the primary phone number and that a single IMEI (864562058225490) is associated with the returned events.",
+              "Accurately listed many counterpart phone numbers and recognized event types (CALL-IN, CALL-OUT, SMS-IN).",
+              "Noted absence of location data and suggested appropriate additional data to improve analysis.",
+              "Clear, structured presentation and concise summary of findings."
+            ],
+            "rationale": "The candidate correctly interprets the graph records in several respects: it identifies the central msisdn, recognizes event types, and correctly notes that a single IMEI appears across events (schema reasoning is good). However, factual grounding is imperfect because the candidate reports an incorrect end time (15:10:40) and omits several counterpart identifiers that appear in the raw records (service shortcodes like CP-EMELDS, AX-MPLPRO, AX-FREOYN, AA-AIRTEL). The response also does not align fully with the user's likely intent to focus on call activity: it mixes SMS and calls without a clear call-only breakdown or verified counts. Clarity and actionability are relatively strong due to organized structure and useful suggestions for additional data. Overall the response is useful but contains concrete omissions and one incorrect timestamp, so scores are moderate rather than high.",
+            "verdict": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "Received calls follow-up",
+      "query": "get me the calls that he received on the same date",
+      "cypher": "MATCH (p:PhoneNumber {msisdn: '9542311767'})\nMATCH (p)-[:INITIATED|TARGET]-(ce:CommunicationEvent)\nWHERE ce.event_id IS NOT NULL\n  AND toUpper(coalesce(ce.type, '')) STARTS WITH 'CALL-'\n  AND toUpper(coalesce(ce.type, '')) STARTS WITH 'CALL-IN'\n  AND toString(ce.timestamp) STARTS WITH '2025-04-01'\nWITH p, ce\nOPTIONAL MATCH (src:PhoneNumber)-[:INITIATED]->(ce)\nWITH p, ce, collect(DISTINCT src.msisdn) AS initiated_numbers\nOPTIONAL MATCH (ce)-[:TARGET]->(dst:PhoneNumber)\nWITH p, ce, initiated_numbers, collect(DISTINCT dst.msisdn) AS target_numbers\nOPTIONAL MATCH (ce)-[:USED_DEVICE]->(dev:Device)\nWITH\n  p,\n  ce,\n  initiated_numbers,\n  target_numbers,\n  collect(DISTINCT dev.imei) AS event_imeis\nRETURN\n  'communication' AS source,\n  ce.event_id AS communication_event_id,\n  NULL AS presence_event_id,\n  ce.type AS event_type,\n  replace(toString(ce.timestamp), ' 00:00:00 ', ' ') AS event_timestamp,\n  ce.duration AS event_duration,\n  [n IN initiated_numbers WHERE n IS NOT NULL] AS initiated_numbers,\n  [n IN target_numbers WHERE n IS NOT NULL] AS target_numbers,\n  [n IN (initiated_numbers + target_numbers) WHERE n IS NOT NULL AND n <> p.msisdn] AS counterpart_numbers,\n  [i IN event_imeis WHERE i IS NOT NULL] AS event_imeis,\n  NULL AS cell_id\nUNION ALL\nMATCH (p:PhoneNumber {msisdn: '9542311767'})-[:SEEN_AT]-(pe:PresenceEvent)-[:AT_LOCATION]-(loc:Location)\nWHERE pe.event_id IS NOT NULL\n  AND toUpper(coalesce(pe.type, '')) STARTS WITH 'CALL-'\n  AND toUpper(coalesce(pe.type, '')) STARTS WITH 'CALL-IN'\n  AND (\n  toString(coalesce(pe.timestamp, pe.time_stamp)) STARTS WITH '2025-04-01'\n  OR toString(coalesce(pe.timestamp, pe.time_stamp)) STARTS WITH '45748'\n)\nRETURN\n  'presence' AS source,\n  NULL AS communication_event_id,\n  pe.event_id AS presence_event_id,\n  pe.type AS event_type,\n  replace(toString(coalesce(pe.timestamp, pe.time_stamp)), ' 00:00:00 ', ' ') AS event_timestamp,\n  pe.duration AS event_duration,\n  [] AS initiated_numbers,\n  [] AS target_numbers,\n  [] AS counterpart_numbers,\n  [] AS event_imeis,\n  loc.cell_id AS cell_id\nORDER BY event_timestamp ASC\nLIMIT 300",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 2,
+              "schema_reasoning": 1,
+              "query_alignment": 3,
+              "completeness": 3,
+              "clarity_actionability": 3
+            },
+            "overall_score_100": 48,
+            "errors": [
+              "Misinterprets 'initiated_numbers' — the records show 9542311767 listed in initiated_numbers, which normally indicates the number initiated the call; the response claims this proves it was the recipient and then contradicts itself.",
+              "Contradictory / incorrect labeling: the response alternately calls 9542311767 the 'Caller' and says other numbers 'called 9542311767'.",
+              "Incorrect 'last recorded call' timestamp: response states last call at 22:05:54 but the records include later timestamps up to 22:47:17 (e.g., 22:36:19 and 22:47:17).",
+              "Missing target numbers from the provided records: 6301368449 and 7207733120 are present in the raw records but absent from the candidate's listed callers.",
+              "Ambiguous statement about directionality: claiming 'Each call event shows that 9542311767 initiated the call ... meaning this number was the recipient' is logically inconsistent."
+            ],
+            "strengths": [
+              "Extracts and lists many individual call events with timestamps and durations from the supplied records.",
+              "Identifies the common device IMEI (864562058225490) across events.",
+              "Correctly notes that events are CALL-IN type and gives first-call timestamp and duration range (min 3s, max 288s).",
+              "Notes lack of presence/location context in the returned communication records."
+            ],
+            "rationale": "The candidate produced a generally useful summary of call events for 2025-04-01, including timestamps, durations, and device IMEI, which aligns with the user's intent to get calls received on that date. However, it committed important factual and schema interpretation errors: it misinterpreted and inconsistently described the directionality (initiated vs received), omitted two target numbers present in the raw records, and reported an incorrect latest-timestamp. These mistakes reduce trust in the interpretation of who called whom and in the completeness of the output. Scores reflect reasonable coverage and usefulness but penalize the incorrect schema reasoning and factual inaccuracies.",
+            "verdict": "fail"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 2,
+              "schema_reasoning": 2,
+              "query_alignment": 4,
+              "completeness": 2,
+              "clarity_actionability": 3
+            },
+            "overall_score_100": 52,
+            "errors": [
+              "Incorrectly reports the last call time as 22:05:54; raw records include later events (22:36:19 and 22:47:17).",
+              "Omits counterpart numbers present in the records (6301368449 and 7207733120).",
+              "Asserts the phone 'received' the calls without reconciling fields: the records show 9542311767 in initiated_numbers (suggesting it may have initiated some events) while event_type is CALL-IN—this direction is not resolved but the response treats them as received.",
+              "Does not enumerate all call events from the raw slice (missing events at 22:36:19 and 22:47:17)."
+            ],
+            "strengths": [
+              "Correctly identifies the primary phone of interest (9542311767) and many counterpart numbers.",
+              "Extracts per-event details (timestamps, durations, caller numbers) for most events.",
+              "Notes the IMEI value present in the records and correctly highlights lack of content/context and location data."
+            ],
+            "rationale": "The candidate correctly summarizes many of the call records (identifies the primary number, many counterpart numbers, IMEI, and several timestamps/durations) and addresses limitations. However, it makes concrete factual errors (wrong final timestamp) and omits two counterpart numbers and associated events present in the raw records. Critically, it states that the phone \"received\" the calls without reconciling the graph fields (initiated_numbers vs. target_numbers) and the CALL-IN label, which is an unsupported inference given the provided fields. Schema usage is uneven: the candidate extracts fields but does not reason about relation directionality or fully enumerate all records. Clarity is acceptable, but incompleteness and the mischaracterization of call direction reduce the utility for an investigator.",
+            "verdict": "fail"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "Other events same date",
+      "query": "what are other events happened of 7207733120 on same date",
+      "cypher": "MATCH (p:PhoneNumber {msisdn: '7207733120'})\nOPTIONAL MATCH (p)-[:INITIATED|TARGET]-(ce:CommunicationEvent)\nWHERE ce.event_id IS NOT NULL\n  AND toString(ce.timestamp) STARTS WITH '2025-04-01'\nOPTIONAL MATCH (ce)-[:INITIATED|TARGET]-(other:PhoneNumber)\nWHERE other.msisdn <> p.msisdn\nWITH p, ce, collect(DISTINCT other.msisdn) AS ce_counterparts\nWITH p, collect(DISTINCT {\n  source: 'communication',\n  event_id: ce.event_id,\n  raw_type: ce.type,\n  norm_type: toUpper(replace(coalesce(ce.type, ''), ' ROAMING', '')),\n  ts_norm: replace(toString(ce.timestamp), ' 00:00:00 ', ' '),\n  tod: right(replace(toString(ce.timestamp), ' 00:00:00 ', ' '), 8),\n  duration: ce.duration,\n  counterpart_numbers: ce_counterparts\n}) AS ce_rows\nOPTIONAL MATCH (p)-[:SEEN_AT]-(pe:PresenceEvent)-[:AT_LOCATION]-(loc:Location)\nWHERE pe.event_id IS NOT NULL\n  AND (\n  toString(coalesce(pe.timestamp, pe.time_stamp)) STARTS WITH '2025-04-01'\n  OR toString(coalesce(pe.timestamp, pe.time_stamp)) STARTS WITH '45748'\n)\nWITH ce_rows, collect(DISTINCT {\n  source: 'presence',\n  event_id: pe.event_id,\n  raw_type: pe.type,\n  norm_type: toUpper(replace(coalesce(pe.type, ''), ' ROAMING', '')),\n  ts_norm: replace(toString(coalesce(pe.timestamp, pe.time_stamp)), ' 00:00:00 ', ' '),\n  tod: right(replace(toString(coalesce(pe.timestamp, pe.time_stamp)), ' 00:00:00 ', ' '), 8),\n  duration: pe.duration,\n  cell_id: loc.cell_id\n}) AS pe_rows\nWITH ce_rows, pe_rows,\n  [c IN ce_rows | c { .*, matched: head([p IN pe_rows WHERE p.norm_type = c.norm_type AND p.tod = c.tod]) }] AS paired\nWITH ce_rows, pe_rows, paired,\n  [p IN pe_rows WHERE size([c IN ce_rows WHERE c.norm_type = p.norm_type AND c.tod = p.tod]) = 0] AS pe_only\nWITH\n  [x IN paired | {\n    event_type: x.raw_type,\n    event_timestamp: x.ts_norm,\n    event_duration: x.duration,\n    communication_event_id: x.event_id,\n    counterpart_numbers: coalesce(x.counterpart_numbers, []),\n    presence_event_id: CASE WHEN x.matched IS NULL THEN NULL ELSE x.matched.event_id END,\n    presence_timestamp: CASE WHEN x.matched IS NULL THEN NULL ELSE x.matched.ts_norm END,\n    cell_id: CASE WHEN x.matched IS NULL THEN NULL ELSE x.matched.cell_id END,\n    merged_with_presence: x.matched IS NOT NULL\n  }] +\n  [p IN pe_only | {\n    event_type: p.raw_type,\n    event_timestamp: p.ts_norm,\n    event_duration: p.duration,\n    communication_event_id: NULL,\n    counterpart_numbers: [],\n    presence_event_id: p.event_id,\n    presence_timestamp: p.ts_norm,\n    cell_id: p.cell_id,\n    merged_with_presence: false\n  }] AS unified\nUNWIND unified AS ev\nRETURN ev.event_type AS event_type, ev.event_timestamp AS event_timestamp, ev.event_duration AS event_duration, ev.communication_event_id AS communication_event_id, ev.presence_event_id AS presence_event_id, ev.cell_id AS cell_id, ev.counterpart_numbers AS counterpart_numbers, ev.merged_with_presence AS merged_with_presence, ev.presence_timestamp AS presence_timestamp\nORDER BY ev.event_timestamp ASC\nLIMIT 300",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 5,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 100,
+            "errors": [],
+            "strengths": [
+              "Accurately reports the single non-null communication record (CALL-IN) with timestamp, duration, event_id, and counterpart number matching the raw records.",
+              "Correctly notes absence of presence/location data for the date and acknowledges the incomplete null record.",
+              "Clear, concise summary and actionable suggestions for additional data that would improve the investigation (presence events, other comms, context on counterpart).",
+              "No unsupported claims beyond the provided records; uses event_id and fields directly from the results."
+            ],
+            "rationale": "The candidate response exactly reflects the provided raw records: one CALL-IN on 2025-04-01 22:47:17, duration 28, communication_event_id b20365f4-3217-4c57-abcd-91324a9f522c, counterpart 9542311767, and a second record containing only nulls. There are no extraneous assertions or hallucinations. The response aligns with the user's intent (listing other events for 7207733120 on that date) and includes useful next steps for further investigation. Schema reasoning is correct: communication and presence were treated distinctly and the absence of matched presence events was reported. Given full accuracy, completeness, and clarity, the maximum scores are assigned and the overall score is 100.",
+            "verdict": "pass"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 4,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 96,
+            "errors": [
+              "Taut/absolute phrasing: states that \"no other activities occurred\" rather than qualifying that no other events are present in the returned records.",
+              "Did not mention the merged_with_presence flag from the results (explicitly false for the returned record), which could be useful context."
+            ],
+            "strengths": [
+              "Accurately extracted and reported the single populated communication event (type, timestamp, duration, event ID, counterpart).",
+              "Correctly identified and described the second record as incomplete/null and therefore not useful.",
+              "Provided actionable suggestions for additional data to collect (presence/location, other comms types) to improve analysis."
+            ],
+            "rationale": "The candidate response correctly and conservatively reports the information present in the raw records: one CALL-IN at 2025-04-01 22:47:17 from 9542311767 lasting 28 seconds, plus a second empty/null record. The response uses the graph-derived concepts appropriately (communication vs presence events, cell_id null) and aligns with the user's intent to find other events for the number on that date. It is clear and offers useful next steps for an investigator. The deduction is minor: the reply asserts no other activities occurred without qualifying that this statement is limited to the returned records, and it omitted explicitly noting the merged_with_presence boolean from the result set. Overall the answer is accurate, well-reasoned, and actionable based on the provided data.",
+            "verdict": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "IP activity",
+      "query": "get the activities of ip address 185.151.204.8",
+      "cypher": "MATCH (ip:IPAddress {ip: '185.151.204.8'})-[r:CONNECTED_TO]-(is:InternetSession)\nRETURN is.session_id AS event_id, is.start_time AS start_time, is.end_time AS end_time, 'InternetSession' AS event_type, type(r) AS relation\nLIMIT 200",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 3,
+              "clarity_actionability": 4
+            },
+            "overall_score_100": 88,
+            "errors": [
+              "Did not list all returned event_id values: omitted two April 5 IDs (8877a7e4-c565-427d-b074-d04e86b53552, b2f2a2d8-fdb1-4eff-94ee-6552c624b45e) and four April 9 IDs (4b4e1046-7911-4cee-91c7-7c0ffd3a097f, 8e074849-09a6-4dc0-8909-2f1e386dccf0, c440a4a7-88a5-4d27-a6b2-d6248f539f5b, ed537e57-1fd3-4cb2-b401-afbed99ac25e)",
+              "Did not call out that multiple session records share identical start/end timestamps (possible duplicate sessions or parallel sessions), which is relevant for investigation completeness"
+            ],
+            "strengths": [
+              "Accurately extracted dates, start/end timestamps, and event types from the records",
+              "Correctly represented the graph relationship (CONNECTED_TO) between the IP and InternetSession nodes",
+              "Organized results by date and provided a concise summary plus sensible next data requests for investigation"
+            ],
+            "rationale": "The candidate response stays within the provided records (no unsupported claims) and correctly interprets the graph relation, so factual_grounding and schema_reasoning are rated highest. The answer aligns well with the user query and presents the sessions and timestamps clearly. However, it is incomplete: several returned event_ids from the raw records were not listed, and the response did not highlight that many records share identical timestamps (which could indicate duplication or concurrent sessions and is pertinent to an investigator). Clarity and actionability are strong due to the structured presentation and recommended next steps, but the omissions reduce completeness and lower the overall score.",
+            "verdict": "pass"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 4,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 96,
+            "errors": [
+              "Did not enumerate the individual session event_ids or provide a session count (14) from the raw records — omission rather than inaccuracy.",
+              "The phrase 'suggesting a pattern or routine' is an interpretation; while supported by repeated identical times, it is inferential rather than strictly record-only."
+            ],
+            "strengths": [
+              "Accurately identified IP and its CONNECTED_TO relationship to InternetSession nodes.",
+              "Correctly extracted and summarized the session dates and that start/end times exist in the records.",
+              "Clearly stated what information is missing (location, device, user, activity) and recommended the types of additional data needed."
+            ],
+            "rationale": "The candidate response stays within the provided records (sessions, dates, start/end times) and correctly interprets the graph relationship (CONNECTED_TO). It aligns with the user's intent to get activities for the IP by summarizing the InternetSession events and noting missing contextual details. The only shortcomings are a lack of explicit enumeration/count of the returned session IDs (the raw slice contains 14 records) and a small interpretive claim about a 'pattern or routine' which, while reasonable, moves slightly beyond pure record reporting. Overall the response is factually grounded, uses the schema correctly, is actionable, and nearly complete.",
+            "verdict": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "IP events involved",
+      "query": "in which events does the i.p address 163.70.138.62 involved",
+      "cypher": "MATCH (ip:IPAddress {ip: '163.70.138.62'})-[r:CONNECTED_TO]-(is:InternetSession)\nRETURN is.session_id AS event_id, is.start_time AS start_time, is.end_time AS end_time, 'InternetSession' AS event_type, type(r) AS relation\nLIMIT 200",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 5,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 100,
+            "errors": [],
+            "strengths": [
+              "Accurately lists all returned event records with correct IDs and timestamps.",
+              "Does not assert claims beyond the provided data; interpretations are clearly labeled as suggestions.",
+              "Organized, readable presentation and helpful next-step data requests for an investigator.",
+              "Correctly identifies the two dates and overlapping sessions where present."
+            ],
+            "rationale": "The candidate response faithfully reproduces the raw query results (12 InternetSession events with their event_ids and timestamps) without introducing incorrect facts. It uses the relation/context appropriately (InternetSession involving the IP) and aligns exactly with the user's request to identify events involving the IP. The response is complete (all records included), clear, and provides actionable next steps for further investigation. No concrete errors were found in the candidate output.",
+            "verdict": "pass"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 4,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 3,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 88,
+            "errors": [
+              "Did not list the specific event_ids from the query results (omitted detailed IDs).",
+              "Made a minor speculative claim: 'might be related or part of a larger event' without evidence in the records."
+            ],
+            "strengths": [
+              "Accurately identified the IP and that it is CONNECTED_TO multiple InternetSession nodes.",
+              "Correctly extracted and summarized the two distinct session time ranges present in the records.",
+              "Clear recommendations for additional data needed (geolocation, activity details, device/user info)."
+            ],
+            "rationale": "The candidate correctly interprets the graph relation (CONNECTED_TO) and the session time ranges, matching the user's intent to find events involving the IP. It reasons with the schema correctly and provides actionable next steps. It falls short on completeness because it did not enumerate the event_ids returned by the Cypher query, and it includes a small speculative observation about sessions being related that goes slightly beyond the raw records. Overall quality is high (scores reflect strong schema reasoning, alignment, and clarity, with a deduction for missing concrete event identifiers and the minor speculation).",
+            "verdict": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "Phone to internet session date",
+      "query": "find the internet sesion of 919959473744 on 2025-04-07",
+      "cypher": "MATCH (p:PhoneNumber {msisdn: '919959473744'})-[r:USED]-(is:InternetSession)\nWHERE is.session_id IS NOT NULL\n  AND (\n  toString(is.start_time) STARTS WITH '2025-04-07'\n  OR toString(is.end_time) STARTS WITH '2025-04-07'\n)\nOPTIONAL MATCH (is)-[rc:CONNECTED_TO]-(ip:IPAddress)\nOPTIONAL MATCH (is)-[rd:USED_DEVICE]-(d:Device)\nRETURN is.session_id AS session_id, is.start_time AS start_time, is.end_time AS end_time, collect(DISTINCT ip.ip) AS ip_addresses, collect(DISTINCT d.imei) AS device_imeis, type(r) AS phone_session_rel, collect(DISTINCT type(rc)) AS ip_rel_types, collect(DISTINCT type(rd)) AS device_rel_types\nORDER BY is.start_time ASC\nLIMIT 300",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 5,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 100,
+            "errors": [],
+            "strengths": [
+              "Accurately extracted both session records (IDs, start/end times) from the raw results.",
+              "Correctly identified the IP address and device IMEI associated with both sessions.",
+              "Properly interpreted graph relationships (USED, CONNECTED_TO, USED_DEVICE).",
+              "Noted the near-simultaneous start times and computed an approximate session duration.",
+              "Provided concise, actionable next steps for further investigation (IP geolocation, device context, additional logs)."
+            ],
+            "rationale": "The candidate response stays strictly within the provided records and does not assert information beyond the data. It correctly maps graph entities and relationships to human-readable findings, aligns directly with the user's query (internet sessions for the specified phone number and date), and includes the key attributes (session_id, start/end times, IP, IMEI). The response is clear, complete for an investigator's immediate needs, and includes reasonable next steps—meeting all rubric criteria at the highest level.",
+            "verdict": "pass"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 5,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 100,
+            "errors": [],
+            "strengths": [
+              "Accurately extracts both session records (IDs, start/end times) from the raw results.",
+              "Correctly maps graph relationships (USED, CONNECTED_TO, USED_DEVICE) to the entities.",
+              "Clearly presents key entities (phone, sessions, IP, device) and timing details.",
+              "Provides sensible next steps (IP geolocation, cell tower, device/user info) for further investigation."
+            ],
+            "rationale": "The candidate response faithfully represents only the information present in the raw records, correctly uses the graph relation semantics, fully answers the user's request by listing both sessions and associated entities, and provides clear, actionable recommendations for follow-up. No factual errors or unsupported claims were made.",
+            "verdict": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "Phone to IP",
+      "query": "ip address of 919959473744",
+      "cypher": "MATCH (p:PhoneNumber {msisdn: '919959473744'})-[*1..2]-(is:InternetSession)-[r:CONNECTED_TO|USED]-(ip:IPAddress)\nRETURN DISTINCT ip.ip AS ip_address, is.session_id AS session_id, is.start_time AS start_time, is.end_time AS end_time, type(r) AS ip_link_type\nLIMIT 200",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 2,
+              "schema_reasoning": 2,
+              "query_alignment": 3,
+              "completeness": 3,
+              "clarity_actionability": 3
+            },
+            "overall_score_100": 52,
+            "errors": [
+              "Includes IP addresses not present in the provided records (e.g., 52.85.173.59, 49.44.243.163, 3.122.16.67).",
+              "Incorrect earliest date: claims sessions span from May 14, 2025, but the provided slice earliest date is May 21, 2025.",
+              "Misstates the graph relation: implies the phone number is connected to InternetSession nodes via a 'CONNECTED_TO' relationship, whereas 'CONNECTED_TO' in the query is between InternetSession and IPAddress.",
+              "States all relationships are 'CONNECTED_TO' without acknowledging the query allowed 'USED' as well (though in this slice all returned records show CONNECTED_TO)."
+            ],
+            "strengths": [
+              "Extracts many correct IP addresses and session IDs that appear in the records (e.g., 185.88.236.68, 157.240.16.51, 49.44.120.88).",
+              "Notes repeated appearance of 185.88.236.68 and the 'nan' entry, correctly flagging a missing/invalid IP.",
+              "Provides useful next-step suggestions for investigators (geolookups, session context, activity patterns).",
+              "Presents findings in a clear, readable structure and correctly summarizes that multiple IPs map to the phone across sessions."
+            ],
+            "rationale": "The candidate response correctly extracts many of the IP addresses, session IDs, and notes repeated connections and a missing 'nan' value, and it offers useful investigative next steps. However, it also introduces extraneous IP addresses that are not in the provided records and reports an incorrect earliest date. The response misrepresents the graph schema by implying the phone->session relationship is labeled CONNECTED_TO when the CONNECTED_TO relationship in the query links InternetSession to IPAddress. These factual and schema errors reduce confidence and practical utility, so scores are moderate rather than high.",
+            "verdict": "fail"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 3,
+              "schema_reasoning": 5,
+              "query_alignment": 4,
+              "completeness": 3,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 80,
+            "errors": [
+              "Incorrect claim that sessions span from 2025-05-14 to 2025-05-30 — the provided records only include dates from 2025-05-21 to 2025-05-30 in the slice.",
+              "Did not mention or flag the record with ip_address = 'nan' (a malformed/missing IP) present in the records.",
+              "Did not provide a complete enumerated list of all distinct IP addresses from the returned records (only gave examples)."
+            ],
+            "strengths": [
+              "Correctly identified the primary entities (phone number, IP addresses, session IDs) and the relationship type (CONNECTED_TO).",
+              "Accurately observed that all link types in the slice are CONNECTED_TO.",
+              "Provided useful next-step suggestions (geolocation, owner/context, session content) that are actionable for an investigator.",
+              "Summarized time-of-day patterns (approx. 11:52–13:03) which matches the session timestamps in the records."
+            ],
+            "rationale": "The candidate accurately interprets the schema and relationships (phone number connected to InternetSession nodes and IPAddress nodes via CONNECTED_TO), and gives clear, actionable next steps. However, it makes a concrete factual error by asserting a start date (May 14, 2025) that is not present in the provided records, fails to flag a malformed 'nan' IP entry, and does not enumerate all distinct IP addresses returned by the query. These shortcomings reduce factual grounding and completeness, while schema reasoning and clarity/actionability remain strong.",
+            "verdict": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "IMEI lookup",
+      "query": "what is the imei of 9542311767",
+      "cypher": "MATCH (p:PhoneNumber {msisdn: '9542311767'})\nOPTIONAL MATCH (p)-[:USED_DEVICE]-(dDirect:Device)\nOPTIONAL MATCH (p)-[:SEEN_AT]-(pe:PresenceEvent)-[*1..2]-(dViaPresence:Device)\nOPTIONAL MATCH (p)-[*1..4]-(dHop:Device)\nWITH [d IN (collect(DISTINCT dDirect) + collect(DISTINCT dViaPresence) + collect(DISTINCT dHop)) WHERE d IS NOT NULL] AS devices\nUNWIND devices AS d\nRETURN DISTINCT d.imei AS imei\nLIMIT 20",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 4,
+              "schema_reasoning": 4,
+              "query_alignment": 5,
+              "completeness": 5,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 92,
+            "errors": [
+              "Refers to a 'HOP' relationship name—Cypher used a generic variable-length path ([:*1..4]) and did not name a relationship type 'HOP'.",
+              "Does not attribute which IMEI came from which match branch (USED_DEVICE vs SEEN_AT vs multi-hop), limiting provenance."
+            ],
+            "strengths": [
+              "Accurately extracted and listed the valid IMEI values from the raw records.",
+              "Noted data-quality issues (the 'nan' entry and the decimal '.0' formatting) and flagged them appropriately.",
+              "Gave useful next-step guidance (need timestamps/filters to identify currently active IMEI).",
+              "Clear, concise summary aligned with the user's query."
+            ],
+            "rationale": "The candidate correctly returned the IMEI values present in the raw records and highlighted data-quality problems, directly answering the user's question. It appropriately described the USED_DEVICE and SEEN_AT relationships and recommended further filtering (e.g., by timestamps) to determine the active IMEI. Points were deducted because the response incorrectly labels the generic multi-hop path as a 'HOP' relationship and does not provide provenance linking each IMEI to the specific path that produced it, which would be important for strict investigative graph reasoning.",
+            "verdict": "pass"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 4,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 4,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 92,
+            "errors": [
+              "Says 'at least 20 different devices' — raw records contain 20 rows but one is 'nan', so there are 19 valid IMEIs, not 20 valid devices.",
+              "Does not distinguish which IMEIs came from direct USED_DEVICE matches versus SEEN_AT or multi-hop matches (omits provenance of each IMEI)."
+            ],
+            "strengths": [
+              "Accurately lists the IMEI values present in the query results (normalized the '... .0' value).",
+              "Notes and flags the 'nan' entry as invalid.",
+              "Avoids unsupported assertions about timestamps or locations and recommends concrete next steps for investigation.",
+              "Clear, concise presentation suitable for an investigator."
+            ],
+            "rationale": "The candidate correctly extracted and presented the IMEI values from the raw records and appropriately flagged the 'nan' entry. It aligned with the user query and gave useful next-step recommendations. The main factual mistake is claiming 'at least 20 different devices' when one returned record is 'nan', so there are 19 valid IMEIs; additionally, the response omitted provenance (which match produced each IMEI), which would be useful for investigative tracing. Overall the response is clear, actionable, and mostly well-grounded in the provided data.",
+            "verdict": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "Hidden link",
+      "query": "get the link between 7989747580 and 8309250357",
+      "cypher": "MATCH (a:PhoneNumber {msisdn: '7989747580'}), (b:PhoneNumber {msisdn: '8309250357'})\nOPTIONAL MATCH (a)-[:INITIATED|TARGET]-(ce:CommunicationEvent)-[:INITIATED|TARGET]-(b)\nOPTIONAL MATCH (a)-[:SEEN_AT]-(pea:PresenceEvent)-[:AT_LOCATION]-(loc:Location)<-[:AT_LOCATION]-(peb:PresenceEvent)-[:SEEN_AT]-(b)\nWITH a, b, ce, loc,\n  collect(DISTINCT toString(coalesce(pea.timestamp, pea.time_stamp))) AS a_presence_timestamps,\n  collect(DISTINCT toString(coalesce(peb.timestamp, peb.time_stamp))) AS b_presence_timestamps,\n  collect(DISTINCT pea.duration) AS a_presence_durations,\n  collect(DISTINCT peb.duration) AS b_presence_durations\nWITH a, b,\n  collect(DISTINCT ce.event_id) AS common_event_ids,\n  collect(DISTINCT loc.cell_id) AS common_cell_ids,\n  collect(DISTINCT {\n    cell_id: loc.cell_id,\n    a_timestamps: a_presence_timestamps,\n    b_timestamps: b_presence_timestamps,\n    a_durations: a_presence_durations,\n    b_durations: b_presence_durations\n  }) AS co_location_evidence\nWITH a, b, common_event_ids, common_cell_ids, co_location_evidence,\n  [x IN co_location_evidence WHERE x.cell_id IS NOT NULL] AS valid_location_evidence\nUNWIND CASE WHEN size(valid_location_evidence) = 0 THEN [NULL] ELSE valid_location_evidence END AS ev\nWITH a, b, common_event_ids, common_cell_ids, valid_location_evidence, ev,\n  CASE\n    WHEN ev IS NULL THEN []\n    ELSE [t IN [x IN ev.a_timestamps | right(replace(x, ' 00:00:00 ', ' '), 8)]\n      WHERE t IN [y IN ev.b_timestamps | right(replace(y, ' 00:00:00 ', ' '), 8)]]\n  END AS overlap_tod\nWITH a, b, common_event_ids, common_cell_ids, valid_location_evidence,\n  collect(DISTINCT {cell_id: CASE WHEN ev IS NULL THEN NULL ELSE ev.cell_id END, overlap_tod: overlap_tod}) AS overlap_evidence\nWITH a, b, common_event_ids, common_cell_ids, valid_location_evidence,\n  [o IN overlap_evidence WHERE o.cell_id IS NOT NULL] AS overlap_evidence_clean\nRETURN a.msisdn AS number_a,\n  b.msisdn AS number_b,\n  common_event_ids,\n  common_cell_ids,\n  valid_location_evidence[0..20] AS co_location_evidence,\n  overlap_evidence_clean[0..20] AS overlap_evidence,\n  reduce(s = 0, o IN overlap_evidence_clean | s + size(o.overlap_tod)) AS temporal_overlap_count,\n  size(common_event_ids) + size(common_cell_ids) + reduce(s = 0, o IN overlap_evidence_clean | s + size(o.overlap_tod)) AS link_strength\nLIMIT 1",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 5,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 100,
+            "errors": [],
+            "strengths": [
+              "Accurately reflects raw query records (common_cell_ids, empty common_event_ids, timestamps, durations, temporal_overlap_count, link_strength).",
+              "Correct interpretation of graph relations (no communication events, presence-based co-location via same cell_id).",
+              "Comprehensive: lists timestamps, durations, overlap result, and numeric link_strength.",
+              "Clear and actionable: concise summary and recommended next investigative steps."
+            ],
+            "rationale": "The candidate response stays within the provided records and does not introduce unsupported claims. It correctly interprets the Cypher output: no shared CommunicationEvent IDs, a single shared cell_id (4058540089312), the presence timestamps and durations for both numbers, an empty temporal overlap, and the computed link_strength of 1. The response uses the graph-schema concepts appropriately (events, presence/location) and answers the user's intent to describe the link between the two numbers. It covers the key entities, times, and relations and presents clear next steps for an investigator. No factual mistakes were found in the provided slice of records.",
+            "verdict": "pass"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 4,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 4,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 92,
+            "errors": [
+              "Says the overlap_evidence section is empty — the record contains an overlap_evidence entry for cell_id 4058540089312 with an empty overlap_tod array (i.e., no temporal overlap), not an absent section.",
+              "Speculates that duration units are \"likely minutes or seconds\" without justification — the raw record lists numeric durations but does not define units."
+            ],
+            "strengths": [
+              "Correctly identifies the shared cell_id (4058540089312) and absence of common_event_ids.",
+              "Accurately reports temporal_overlap_count = 0 and link_strength = 1 derived from the records.",
+              "Clearly summarizes co-location timestamps and durations for each number.",
+              "Provides actionable next steps for further investigation."
+            ],
+            "rationale": "The candidate response largely adheres to the supplied records: it identifies the shared cell ID, reports no communication events, lists the presence timestamps and durations, and correctly states there is no temporal overlap and a link_strength of 1. Schema reasoning is correct — communication vs presence relationships are interpreted properly. Deductions and suggested next steps are relevant and useful. Minor factual issues reduce the grounding score: the response incorrectly describes the overlap_evidence section as empty when it contains an entry with an empty overlap_tod (functionally no overlap), and it makes an unsupported assumption about duration units. Completeness is high but not perfect because of that small mischaracterization. Overall this is a strong, clear, and actionable investigator-oriented summary.",
+            "verdict": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "Try-for hidden link",
+      "query": "try for 9391616029 and 6304364216",
+      "cypher": "MATCH (a:PhoneNumber {msisdn: '9391616029'}), (b:PhoneNumber {msisdn: '6304364216'})\nOPTIONAL MATCH (a)-[:INITIATED|TARGET]-(ce:CommunicationEvent)-[:INITIATED|TARGET]-(b)\nOPTIONAL MATCH (a)-[:SEEN_AT]-(pea:PresenceEvent)-[:AT_LOCATION]-(loc:Location)<-[:AT_LOCATION]-(peb:PresenceEvent)-[:SEEN_AT]-(b)\nWITH a, b, ce, loc,\n  collect(DISTINCT toString(coalesce(pea.timestamp, pea.time_stamp))) AS a_presence_timestamps,\n  collect(DISTINCT toString(coalesce(peb.timestamp, peb.time_stamp))) AS b_presence_timestamps,\n  collect(DISTINCT pea.duration) AS a_presence_durations,\n  collect(DISTINCT peb.duration) AS b_presence_durations\nWITH a, b,\n  collect(DISTINCT ce.event_id) AS common_event_ids,\n  collect(DISTINCT loc.cell_id) AS common_cell_ids,\n  collect(DISTINCT {\n    cell_id: loc.cell_id,\n    a_timestamps: a_presence_timestamps,\n    b_timestamps: b_presence_timestamps,\n    a_durations: a_presence_durations,\n    b_durations: b_presence_durations\n  }) AS co_location_evidence\nWITH a, b, common_event_ids, common_cell_ids, co_location_evidence,\n  [x IN co_location_evidence WHERE x.cell_id IS NOT NULL] AS valid_location_evidence\nUNWIND CASE WHEN size(valid_location_evidence) = 0 THEN [NULL] ELSE valid_location_evidence END AS ev\nWITH a, b, common_event_ids, common_cell_ids, valid_location_evidence, ev,\n  CASE\n    WHEN ev IS NULL THEN []\n    ELSE [t IN [x IN ev.a_timestamps | right(replace(x, ' 00:00:00 ', ' '), 8)]\n      WHERE t IN [y IN ev.b_timestamps | right(replace(y, ' 00:00:00 ', ' '), 8)]]\n  END AS overlap_tod\nWITH a, b, common_event_ids, common_cell_ids, valid_location_evidence,\n  collect(DISTINCT {cell_id: CASE WHEN ev IS NULL THEN NULL ELSE ev.cell_id END, overlap_tod: overlap_tod}) AS overlap_evidence\nWITH a, b, common_event_ids, common_cell_ids, valid_location_evidence,\n  [o IN overlap_evidence WHERE o.cell_id IS NOT NULL] AS overlap_evidence_clean\nRETURN a.msisdn AS number_a,\n  b.msisdn AS number_b,\n  common_event_ids,\n  common_cell_ids,\n  valid_location_evidence[0..20] AS co_location_evidence,\n  overlap_evidence_clean[0..20] AS overlap_evidence,\n  reduce(s = 0, o IN overlap_evidence_clean | s + size(o.overlap_tod)) AS temporal_overlap_count,\n  size(common_event_ids) + size(common_cell_ids) + reduce(s = 0, o IN overlap_evidence_clean | s + size(o.overlap_tod)) AS link_strength\nLIMIT 1",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 5,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 100,
+            "errors": [],
+            "strengths": [
+              "Accurately reports absence of common communication events and presence of a shared cell ID from the records.",
+              "Correctly interprets co-location evidence and lack of temporal overlap (overlap_tod empty).",
+              "Includes relevant timestamps and duration details consistent with the raw records.",
+              "Provides a clear summary (link strength and temporal overlap) and pragmatic next-step recommendations."
+            ],
+            "rationale": "The candidate response stays within the provided records, correctly identifying common_cell_ids (405854221DE10), empty common_event_ids, the presence timestamp examples, the single short duration for number B, zero temporal overlaps, and the computed link_strength of 1. It uses the graph-derived concepts (communication events, presence events, location) appropriately, aligns with the user's pairwise query, and presents the findings and recommended follow-ups clearly. No factual inaccuracies or unsupported inferences were found in the evaluated response.",
+            "verdict": "pass"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 4,
+              "schema_reasoning": 4,
+              "query_alignment": 5,
+              "completeness": 4,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 88,
+            "errors": [
+              "Misstated the number of timestamps for Number A: response says 22 but raw record lists 27 a_timestamps.",
+              "Did not mention the a_durations list includes a zero value (raw a_durations includes 0).",
+              "Wording 'co-located on multiple occasions' is ambiguous and could be read as implying temporal overlap; raw data shows same cell on multiple dates but no temporal overlap (overlap_tod = [])."
+            ],
+            "strengths": [
+              "Correctly identified the common cell ID (405854221DE10).",
+              "Correctly reported there are no common communication events and temporal_overlap_count = 0.",
+              "Correctly reported link_strength = 1 and explained its basis.",
+              "Clear recommendations for follow-up data (cell tower locations, communication logs)."
+            ],
+            "rationale": "The candidate largely stays within the provided records and uses the graph-derived outputs appropriately: it highlights the shared cell_id, absence of shared communication events, zero temporal overlap, and the computed link_strength. However, it includes a concrete numeric error (count of a_timestamps) and omits noting a zero duration in the a_durations array. The phrase about being 'co-located on multiple occasions' is imprecise given the explicit overlap_tod = [] (no simultaneous presence); a clearer statement would note presence on the same dates/cell but without temporal overlap. Overall the response is aligned to the user request, actionable, and mostly accurate, so it receives a high score with deductions for the noted factual/phrasing issues.",
+            "verdict": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "Co-location",
+      "query": "are the numbers 9391616029 6304364216 located in same place at any time",
+      "cypher": "MATCH (a:PhoneNumber {msisdn: '9391616029'})-[:SEEN_AT]-(pea:PresenceEvent)-[:AT_LOCATION]-(loc:Location)\nMATCH (b:PhoneNumber {msisdn: '6304364216'})-[:SEEN_AT]-(peb:PresenceEvent)-[:AT_LOCATION]-(loc)\nWHERE 1=1\n  \nWITH a, b, loc,\n  collect(DISTINCT pea.event_id) AS a_event_ids,\n  collect(DISTINCT peb.event_id) AS b_event_ids,\n  collect(DISTINCT coalesce(pea.timestamp, pea.time_stamp)) AS a_timestamps,\n  collect(DISTINCT coalesce(peb.timestamp, peb.time_stamp)) AS b_timestamps\nRETURN a.msisdn AS number_a, b.msisdn AS number_b, loc.cell_id AS cell_id, a_event_ids[0..100] AS a_event_ids, b_event_ids[0..100] AS b_event_ids, a_timestamps[0..100] AS a_timestamps, b_timestamps[0..100] AS b_timestamps, size(a_timestamps) + size(b_timestamps) AS link_strength\nORDER BY link_strength DESC\nLIMIT 20",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 3,
+              "schema_reasoning": 3,
+              "query_alignment": 5,
+              "completeness": 4,
+              "clarity_actionability": 4
+            },
+            "overall_score_100": 76,
+            "errors": [
+              "Assumes continuous presence ranges (e.g., '18:01:32 - 19:39:21') without evidence — raw records are discrete timestamps.",
+              "Omitted the 2025-04-05 22:59:28 timestamp for number A (raw records include 2025-04-05 22:59:28).",
+              "Characterizes link_strength qualitatively as based on 'overlapping presence events' — in the query it is actually computed as the sum of the returned timestamp counts."
+            ],
+            "strengths": [
+              "Correctly identifies the shared Location (cell_id 405854221DE10) and both phone numbers.",
+              "Extracts and lists the discrete timestamps for both numbers, including both of number B's timestamps.",
+              "Correctly concludes there is no exact timestamp match between the two numbers and reports the link_strength value (29)."
+            ],
+            "rationale": "The candidate correctly answers the user's question (they were at the same cell_id) and extracts the timestamps and link_strength from the records, so query_alignment is strong. However the response goes beyond the raw records by implying continuous presence intervals rather than reporting discrete event timestamps, and it omitted at least one timestamp (2025-04-05 22:59:28) for number A. The candidate also slightly misinterprets the meaning of link_strength. Overall the response is useful and clear for an investigator but has minor factual and schema-reasoning inaccuracies, so the score reflects a generally good but imperfect analysis.",
+            "verdict": "pass"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 4,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 3,
+              "clarity_actionability": 4
+            },
+            "overall_score_100": 84,
+            "errors": [
+              "Incorrectly summarized Number A's April 5 presence as ending at 19:39:21 — the raw records also include 21:31:01 and 22:59:28 on 2025-04-05, so that range is incomplete/incorrect.",
+              "Did not mention event IDs or map specific events to timestamps (omitted detail that could confirm co-occurrence at finer granularity).",
+              "Implied absence of temporal overlap based solely on non-equal timestamps without explicitly noting event granularity limits (instantaneous timestamps vs. interval presence)."
+            ],
+            "strengths": [
+              "Correctly identified the shared Location (cell_id 405854221DE10) from the records.",
+              "Accurately extracted Number B's timestamps and many of Number A's timestamps from the raw records.",
+              "Direct answer aligned with the user's question (stated they were at the same place but not at the same exact recorded timestamps) and included link_strength."
+            ],
+            "rationale": "The candidate correctly used the query results to identify that both numbers were seen at the same cell_id and listed timestamps for both numbers, demonstrating correct schema reasoning and alignment with the user's intent. Points were deducted for factual grounding and completeness because the April 5 summary for Number A omitted later timestamps present in the records (21:31:01 and 22:59:28) and the response did not tie event IDs to timestamps to fully support the non-overlap conclusion. Additionally, the answer could have noted the limitation that discrete timestamps do not prove continuous presence, which affects claiming no temporal overlap. Overall the response is clear and actionable but misses some record-level details needed for a fully complete and rigorous investigative conclusion.",
+            "verdict": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "Events at cell",
+      "query": "any events at cell id 405854221DE10 for 9391616029",
+      "cypher": "MATCH (p:PhoneNumber {msisdn: '9391616029'})-[:INITIATED|TARGET]-(ce:CommunicationEvent)\nWITH p, ce, toString(ce.timestamp) AS ce_ts, right(toString(ce.timestamp), 8) AS ce_tod\nMATCH (p)-[:SEEN_AT]-(pe:PresenceEvent)-[:AT_LOCATION]-(l:Location {cell_id: '405854221DE10'})\nWITH ce, ce_ts, ce_tod, l, toString(coalesce(pe.timestamp, pe.time_stamp)) AS pe_ts, right(toString(coalesce(pe.timestamp, pe.time_stamp)), 8) AS pe_tod\nWHERE ce_ts = pe_ts OR ce_tod = pe_tod\nRETURN DISTINCT ce.event_id AS event_id, ce.type AS event_type, ce.timestamp AS event_timestamp, ce.duration AS event_duration, l.cell_id AS cell_id, pe_ts AS matched_presence_timestamp\nORDER BY ce.timestamp DESC\nLIMIT 200",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 5,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 100,
+            "errors": [],
+            "strengths": [
+              "Accurately reports the query result (empty result set) matching the provided raw records.",
+              "Correctly references the key entities (phone number and cell ID) and the intended graph relationships.",
+              "Provides concise, relevant next-step suggestions for further investigation.",
+              "Clear and unambiguous language suitable for an investigator."
+            ],
+            "rationale": "The candidate response correctly and succinctly states that the executed Cypher returned no matching records and does not make any unsupported claims. It accurately references the phone number and cell id, describes the intended relationships in the query, and offers practical next steps to expand the investigation. There are no factual errors or misuse of schema relations in the response, so it receives full marks across all rubric categories.",
+            "verdict": "pass"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 5,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 100,
+            "errors": [
+              "Refers to CommunicationEvent as 'calls or messages' — a minor characterization not explicitly present in the returned records or query results."
+            ],
+            "strengths": [
+              "Accurately reports that the executed query returned an empty result set.",
+              "Correctly summarizes the graph relationships and matching logic used (communication events matched to presence events by timestamp/time-of-day).",
+              "Provides clear, actionable next steps for further investigation (broaden time window, check other locations or data sources)."
+            ],
+            "rationale": "The candidate response correctly and concisely reflects the query outcome (empty result set) and accurately describes the graph schema relations and matching criteria used in the Cypher. It aligns with the user's intent and offers reasonable next steps for investigation. The only minor issue is a small, non-critical assumption when labeling CommunicationEvent as 'calls or messages,' which is not explicitly present in the returned records. Overall the response is factually grounded, uses schema relations properly, is complete for the user's request, and is clear and actionable.",
+            "verdict": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "Event location lookup",
+      "query": "location of 450b2dc3-bfed-419d-9994-5e16bf162808",
+      "cypher": "MATCH (ce:CommunicationEvent {event_id: '450b2dc3-bfed-419d-9994-5e16bf162808'})\nOPTIONAL MATCH (src:PhoneNumber)-[:INITIATED]->(ce)\nOPTIONAL MATCH (ce)-[:TARGET]->(dst:PhoneNumber)\nWITH ce, [n IN (collect(DISTINCT src.msisdn) + collect(DISTINCT dst.msisdn)) WHERE n IS NOT NULL] AS linked_numbers\nUNWIND CASE WHEN size(linked_numbers) = 0 THEN [NULL] ELSE linked_numbers END AS linked_msisdn\nOPTIONAL MATCH (p:PhoneNumber {msisdn: linked_msisdn})-[:SEEN_AT]-(pe:PresenceEvent)-[:AT_LOCATION]-(loc:Location)\nWITH ce, linked_numbers, collect(DISTINCT {\n  presence_event_id: pe.event_id,\n  presence_type: pe.type,\n  presence_timestamp: toString(coalesce(pe.timestamp, pe.time_stamp)),\n  cell_id: loc.cell_id\n}) AS pe_candidates\nWITH ce, linked_numbers,\n  [pc IN pe_candidates WHERE pc.presence_timestamp IS NOT NULL AND (\n    replace(pc.presence_timestamp, ' 00:00:00 ', ' ') = replace(toString(ce.timestamp), ' 00:00:00 ', ' ')\n    OR right(replace(pc.presence_timestamp, ' 00:00:00 ', ' '), 8) = right(replace(toString(ce.timestamp), ' 00:00:00 ', ' '), 8)\n  )] AS matched_presence\nRETURN\n  'CommunicationEvent' AS source_event_label,\n  ce.event_id AS event_id,\n  ce.type AS event_type,\n  toString(ce.timestamp) AS event_timestamp,\n  ce.duration AS event_duration,\n  linked_numbers,\n  [m IN matched_presence | m.presence_event_id] AS matched_presence_event_ids,\n  [m IN matched_presence | m.cell_id] AS inferred_cell_ids,\n  [m IN matched_presence | m.presence_timestamp] AS matched_presence_timestamps\nUNION ALL\nMATCH (pe:PresenceEvent {event_id: '450b2dc3-bfed-419d-9994-5e16bf162808'})-[:AT_LOCATION]-(loc:Location)\nOPTIONAL MATCH (p:PhoneNumber)-[:SEEN_AT]-(pe)\nRETURN\n  'PresenceEvent' AS source_event_label,\n  pe.event_id AS event_id,\n  pe.type AS event_type,\n  toString(coalesce(pe.timestamp, pe.time_stamp)) AS event_timestamp,\n  pe.duration AS event_duration,\n  collect(DISTINCT p.msisdn) AS linked_numbers,\n  [pe.event_id] AS matched_presence_event_ids,\n  collect(DISTINCT loc.cell_id) AS inferred_cell_ids,\n  [toString(coalesce(pe.timestamp, pe.time_stamp))] AS matched_presence_timestamps\nLIMIT 20",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 4,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 5,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 96,
+            "errors": [
+              "The response opens by calling the record a 'communication event' even though the returned record's source_event_label is 'PresenceEvent' (minor label mismatch).",
+              "Minor interpretation: stating 'does not have a duration, typical for SMS events' is an assumption beyond the provided records (not strictly supported by the raw data)."
+            ],
+            "strengths": [
+              "Accurately extracted key fields: event_id, event_type, timestamp, linked phone number, and inferred cell_id from the returned record.",
+              "Correctly recognized that the presence event timestamp matches the communication timestamp (supports co-occurrence inference).",
+              "Provides concise, actionable next steps (resolve cell_id to geographic coordinates, seek SMS content and related events)."
+            ],
+            "rationale": "The candidate response correctly parses the returned record and uses the graph relationships appropriately to infer location (presence event -> AT_LOCATION -> Location) and link to a phone number. It aligns with the user's request to locate the given event and includes the essential entities (event id, type, timestamp, msisdn, cell_id). I deducted one point for factual_grounding because the response initially labels the record as a 'communication event' while the returned row is from the 'PresenceEvent' branch (a minor labeling mismatch), and for a minor unsupported generalization about SMS durations. Otherwise the reasoning, completeness, and clarity are strong and directly useful to an investigator.",
+            "verdict": "pass"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 5,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 100,
+            "errors": [],
+            "strengths": [
+              "Accurately extracts key fields from the provided record (event_id, type, timestamp, linked MSISDN, cell_id).",
+              "Correctly interprets and reports the relationship between the event, the phone number, and the inferred cell location.",
+              "Concise and relevant suggestions for further investigative steps (geolocation for cell ID, SMS content, related events).",
+              "No unsupported claims beyond the raw records; maintains appropriate uncertainty."
+            ],
+            "rationale": "The candidate response correctly and exclusively reports facts present in the raw record: the record is a PresenceEvent with event_id '450b2dc3-bfed-419d-9994-5e16bf162808', type 'SMS-IN', timestamp '2025-04-05 18:01:13', linked msisdn '9640303818', and inferred cell_id '404-49-31522-232190771'. The response uses the graph-derived relations appropriately (association of PresenceEvent to PhoneNumber and Location) and aligns with the user's intent to determine the location for the given ID by returning the inferred cell ID. It is complete for the investigator's immediate needs (covers event, time, number, and cell_id) and provides actionable next steps without adding unverified information. Therefore it receives top marks across all rubric categories.",
+            "verdict": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "Phone to location path",
+      "query": "do the phone number 9440331353 connected to tower cell_id 405854221DD10",
+      "cypher": "MATCH (a:PhoneNumber {msisdn: '9440331353'}), (b:Location {cell_id: '405854221DD10'})\nMATCH p = (a)-[*1..4]-(b)\nRETURN p\nORDER BY length(p) ASC\nLIMIT 10",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 4,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 96,
+            "errors": [
+              "Did not include all returned PresenceEvent records from the query result (several May 3 events and others present in the raw slice were omitted).",
+              "Did not report event_ids or relationship ids from the records (omitted concrete identifiers that could aid traceability)."
+            ],
+            "strengths": [
+              "Correctly concludes that the phone number is connected to the specified cell_id and provides direct evidence (PresenceEvent nodes linking PhoneNumber -> PresenceEvent -> Location).",
+              "Accurately describes the graph relationships (SEEN_AT and AT_LOCATION) and their semantics.",
+              "Clear, concise breakdown of key events (types, durations, timestamps) and useful suggestions for additional data to collect."
+            ],
+            "rationale": "The candidate's response correctly and conservatively reports only information present in the query results: the PhoneNumber node is linked via SEEN_AT to multiple PresenceEvent nodes which in turn have AT_LOCATION edges to the Location node with cell_id 405854221DD10. Relationship semantics are correctly stated. The response aligns with the user's intent (confirm connection) and is actionable for an investigator. It loses one point on completeness because it omits several returned events from the raw records and does not surface event_ids/relationship ids for direct traceability, which would be useful in an investigative context.",
+            "verdict": "pass"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 4,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 4,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 92,
+            "errors": [
+              "Misstated the overall timestamp range: reported range only within 2025-04-05 and then separately noted a single 2025-05-03 timestamp, omitting multiple May-03 timestamps present in the records.",
+              "Did not enumerate all presence-event records (timestamps/durations) from the provided slice or give a count of occurrences."
+            ],
+            "strengths": [
+              "Correctly identified the PhoneNumber and Location nodes and the SEEN_AT / AT_LOCATION relationship chain.",
+              "Accurately described event types (CALL-IN / CALL-OUT) and noted multiple occasions of co-location.",
+              "Provided useful investigation next steps and clear limitations of the data."
+            ],
+            "rationale": "The candidate response stays within the provided records and correctly uses the graph schema to explain how the PhoneNumber is connected to the Location via PresenceEvent nodes (SEEN_AT then AT_LOCATION). That supports a direct answer to the query that the phone was seen at the specified cell tower on multiple occasions. Minor faults reduce the factual_grounding and completeness scores: the response summarized the timestamp range in a way that downplays several May 3 entries present in the slice and did not list or count every event (the slice contains multiple May-03 timestamps and durations). Schema reasoning and query alignment are strong because relationships and intent are correctly addressed. Clarity and actionability are high due to concise explanation and sensible next-step suggestions.",
+            "verdict": "pass"
+          }
+        }
+      ]
+    },
+    {
+      "caseName": "Most-called",
+      "query": "to whom did this person having number 7989747580 called the most?",
+      "cypher": "MATCH (p:PhoneNumber {msisdn: '7989747580'})-[:INITIATED|TARGET]-(ce:CommunicationEvent)-[:INITIATED|TARGET]-(other:PhoneNumber)\nWHERE other.msisdn <> p.msisdn AND ce.type IN ['CALL-IN', 'CALL-OUT']\nRETURN other.msisdn AS other_number, count(DISTINCT ce) AS call_count\nORDER BY call_count DESC\nLIMIT 1",
+      "judged": [
+        {
+          "provider": "openai",
+          "model": "gpt-4o-mini",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 5,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 100,
+            "errors": [],
+            "strengths": [
+              "Accurately reports the empty result set and does not assert facts beyond the returned records.",
+              "Correctly references the query's focus on CALL-IN and CALL-OUT events and the matching logic.",
+              "Provides concise, relevant next steps (broaden time frame, include other event types, check filters).",
+              "Clear, unambiguous conclusion that no determination can be made from the provided data."
+            ],
+            "rationale": "The candidate response correctly interprets the empty query result and refrains from making unsupported claims, satisfying factual_grounding. It demonstrates correct understanding of the graph relations and the query's filtering on CALL-IN and CALL-OUT events, fulfilling schema_reasoning. The answer directly addresses the user's question (who was called most) and explains why it cannot be answered given the data, meeting query_alignment. It covers necessary considerations (that no calls were recorded and suggestions for additional data or broader queries), satisfying completeness. The response is concise, actionable, and clear for an investigator to follow up, meeting clarity_actionability. No concrete mistakes were identified in the response.",
+            "verdict": "pass"
+          }
+        },
+        {
+          "provider": "groq",
+          "model": "llama-3.3-70b-versatile",
+          "judgment": {
+            "scores": {
+              "factual_grounding": 5,
+              "schema_reasoning": 5,
+              "query_alignment": 5,
+              "completeness": 5,
+              "clarity_actionability": 5
+            },
+            "overall_score_100": 100,
+            "errors": [],
+            "strengths": [
+              "Accurately reports that the query result set is empty and draws the correct inference that no determination can be made from the provided data.",
+              "Correctly describes the Cypher query logic (relations used, exclusion of same-number, filtering on CALL-IN/CALL-OUT).",
+              "Provides concise, actionable next steps (verify existence, broaden data) to enable further investigation.",
+              "Clear and well-structured explanation suitable for an investigator."
+            ],
+            "rationale": "The candidate response faithfully reflects the raw records (empty result), correctly interprets the executed Cypher query and its filters, and aligns directly with the user's intent to identify the most-called number. It makes no unsupported claims, suggests appropriate follow-up actions, and communicates clearly. Therefore it scores the maximum in all rubric categories.",
+            "verdict": "pass"
+          }
+        }
+      ]
+    }
+  ]
+}

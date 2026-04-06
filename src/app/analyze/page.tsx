@@ -124,7 +124,11 @@ type StreamFinalPayload = {
 type ConfusionMatrixPayload = {
   success: boolean;
   labels: InvestigationIntent[];
-  matrix: Array<{ trueIntent: InvestigationIntent; predictedIntent: InvestigationIntent; count: number }>;
+  matrix: Array<{
+    trueIntent: InvestigationIntent;
+    predictedIntent: InvestigationIntent;
+    count: number;
+  }>;
   stats: Array<{
     intent: InvestigationIntent;
     support: number;
@@ -137,7 +141,11 @@ type ConfusionMatrixPayload = {
   macro: { precision: number; recall: number; f1: number };
   micro: { precision: number; recall: number; f1: number };
   totalLabeled: number;
-  topConfusions: Array<{ trueIntent: InvestigationIntent; predictedIntent: InvestigationIntent; count: number }>;
+  topConfusions: Array<{
+    trueIntent: InvestigationIntent;
+    predictedIntent: InvestigationIntent;
+    count: number;
+  }>;
   unresolvedLabelCount: number;
 };
 
@@ -376,7 +384,7 @@ function getSuggestions(messages: Message[]): string[] {
     }
   }
 
-  suggestions.push('What should I investigate next based on this result?');
+  // suggestions.push('What should I investigate next based on this result?');
 
   return Array.from(new Set(suggestions)).slice(0, 3);
 }
@@ -435,7 +443,8 @@ function inferGraphFromCallActivityRows(
 
   for (const row of records) {
     const eventId = typeof row.event_id === 'string' ? row.event_id : '';
-    const eventType = typeof row.event_type === 'string' ? row.event_type : 'CALL';
+    const eventType =
+      typeof row.event_type === 'string' ? row.event_type : 'CALL';
     if (!eventId) continue;
 
     const eventNodeId = `event:${eventId}`;
@@ -447,9 +456,13 @@ function inferGraphFromCallActivityRows(
         event_id: eventId,
         type: eventType,
         timestamp:
-          typeof row.event_timestamp === 'string' ? row.event_timestamp : undefined,
+          typeof row.event_timestamp === 'string'
+            ? row.event_timestamp
+            : undefined,
         duration:
-          typeof row.event_duration === 'number' ? row.event_duration : undefined,
+          typeof row.event_duration === 'number'
+            ? row.event_duration
+            : undefined,
       },
     });
 
@@ -632,9 +645,9 @@ export default function AnalyzePage() {
   const [labelReasonDraft, setLabelReasonDraft] = useState<
     Record<string, string>
   >({});
-  const [labelNotesDraft, setLabelNotesDraft] = useState<Record<string, string>>(
-    {},
-  );
+  const [labelNotesDraft, setLabelNotesDraft] = useState<
+    Record<string, string>
+  >({});
   const [labelSaving, setLabelSaving] = useState<Record<string, boolean>>({});
   const [editReviewedLabel, setEditReviewedLabel] = useState<
     Record<string, boolean>
@@ -777,7 +790,8 @@ export default function AnalyzePage() {
       setEditReviewedLabel((prev) => ({ ...prev, [msg.id]: false }));
       window.dispatchEvent(new Event('case-history-updated'));
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to save label.';
+      const message =
+        err instanceof Error ? err.message : 'Failed to save label.';
       const errorMsg: Message = {
         id: createMessageId('label-error'),
         role: 'system',
@@ -813,7 +827,9 @@ export default function AnalyzePage() {
           const msg = messagesFromDb[i];
           if (msg.role !== 'system') continue;
           if (
-            (msg.graph && Array.isArray(msg.graph.nodes) && msg.graph.nodes.length > 0) ||
+            (msg.graph &&
+              Array.isArray(msg.graph.nodes) &&
+              msg.graph.nodes.length > 0) ||
             (msg.records && msg.records.length > 0) ||
             (typeof msg.cypher === 'string' && msg.cypher.trim().length > 0)
           ) {
@@ -967,7 +983,8 @@ export default function AnalyzePage() {
         );
       const startsWithCypherProcedure =
         /^\s*call\s+[A-Za-z_][A-Za-z0-9_.]*\s*\(/i.test(userQuery);
-      const isLikelyCypher = startsWithCypherClause || startsWithCypherProcedure;
+      const isLikelyCypher =
+        startsWithCypherClause || startsWithCypherProcedure;
       const isFlowchartOnlyRequest =
         detectFlowchartOnlyRequest(userQuery) && !isLikelyCypher;
 
@@ -980,7 +997,11 @@ export default function AnalyzePage() {
               ? sourceMessage.graph
               : null;
 
-          if (!derivedGraph && sourceMessage.records && sourceMessage.records.length > 0) {
+          if (
+            !derivedGraph &&
+            sourceMessage.records &&
+            sourceMessage.records.length > 0
+          ) {
             derivedGraph = extractGraphFromRecords(
               sourceMessage.records as Record<string, unknown>[],
             );
@@ -1006,7 +1027,11 @@ export default function AnalyzePage() {
               }),
             });
             const graphData = await graphRes.json().catch(() => null);
-            if (graphRes.ok && graphData?.success && graphData?.graph?.nodes?.length) {
+            if (
+              graphRes.ok &&
+              graphData?.success &&
+              graphData?.graph?.nodes?.length
+            ) {
               derivedGraph = graphData.graph as GraphPayload;
             }
           }
@@ -1015,8 +1040,7 @@ export default function AnalyzePage() {
             const chartMsg: Message = {
               id: createMessageId('system'),
               role: 'system',
-              content:
-                `Relationship flowchart generated from the previous output.\n\n${buildFlowchartMarkdown(derivedGraph)}`,
+              content: `Relationship flowchart generated from the previous output.\n\n${buildFlowchartMarkdown(derivedGraph)}`,
               timestamp: getTimestamp(),
               createdAt: getMessageCreatedAt(),
               graph: derivedGraph,
@@ -1415,23 +1439,48 @@ export default function AnalyzePage() {
                       <table className="min-w-full border-collapse text-[11px]">
                         <thead className="bg-slate-100">
                           <tr>
-                            <th className="border-b border-slate-200 px-2 py-1 text-left">Intent</th>
-                            <th className="border-b border-slate-200 px-2 py-1 text-left">Support</th>
-                            <th className="border-b border-slate-200 px-2 py-1 text-left">Precision</th>
-                            <th className="border-b border-slate-200 px-2 py-1 text-left">Recall</th>
-                            <th className="border-b border-slate-200 px-2 py-1 text-left">F1</th>
+                            <th className="border-b border-slate-200 px-2 py-1 text-left">
+                              Intent
+                            </th>
+                            <th className="border-b border-slate-200 px-2 py-1 text-left">
+                              Support
+                            </th>
+                            <th className="border-b border-slate-200 px-2 py-1 text-left">
+                              Precision
+                            </th>
+                            <th className="border-b border-slate-200 px-2 py-1 text-left">
+                              Recall
+                            </th>
+                            <th className="border-b border-slate-200 px-2 py-1 text-left">
+                              F1
+                            </th>
                           </tr>
                         </thead>
                         <tbody>
                           {matrixData.stats
-                            .filter((s) => s.support > 0 || s.predictedCount > 0)
+                            .filter(
+                              (s) => s.support > 0 || s.predictedCount > 0,
+                            )
                             .map((s) => (
-                              <tr key={`stat-${s.intent}`} className="odd:bg-white even:bg-slate-50">
-                                <td className="border-b border-slate-100 px-2 py-1">{s.intent}</td>
-                                <td className="border-b border-slate-100 px-2 py-1">{s.support}</td>
-                                <td className="border-b border-slate-100 px-2 py-1">{s.precision}</td>
-                                <td className="border-b border-slate-100 px-2 py-1">{s.recall}</td>
-                                <td className="border-b border-slate-100 px-2 py-1">{s.f1}</td>
+                              <tr
+                                key={`stat-${s.intent}`}
+                                className="odd:bg-white even:bg-slate-50"
+                              >
+                                <td className="border-b border-slate-100 px-2 py-1">
+                                  {s.intent}
+                                </td>
+                                <td className="border-b border-slate-100 px-2 py-1">
+                                  {s.support}
+                                </td>
+                                <td className="border-b border-slate-100 px-2 py-1">
+                                  {s.precision}
+                                </td>
+                                <td className="border-b border-slate-100 px-2 py-1">
+                                  {s.recall}
+                                </td>
+                                <td className="border-b border-slate-100 px-2 py-1">
+                                  {s.f1}
+                                </td>
                               </tr>
                             ))}
                         </tbody>
@@ -1454,8 +1503,15 @@ export default function AnalyzePage() {
                             key={`${c.trueIntent}-${c.predictedIntent}-${idx}`}
                             className="rounded border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
                           >
-                            true: <span className="font-semibold">{c.trueIntent}</span> {'->'} predicted:{' '}
-                            <span className="font-semibold">{c.predictedIntent}</span> ({c.count})
+                            true:{' '}
+                            <span className="font-semibold">
+                              {c.trueIntent}
+                            </span>{' '}
+                            {'->'} predicted:{' '}
+                            <span className="font-semibold">
+                              {c.predictedIntent}
+                            </span>{' '}
+                            ({c.count})
                           </div>
                         ))
                       )}
@@ -1552,12 +1608,11 @@ export default function AnalyzePage() {
                         <div className="flex items-center justify-between gap-2">
                           <div className="text-[11px] text-emerald-800">
                             Reviewed intent:{' '}
-                            <span className="font-semibold">{msg.trueIntent}</span>
+                            <span className="font-semibold">
+                              {msg.trueIntent}
+                            </span>
                             {msg.intentReasonTag ? (
-                              <>
-                                {' '}
-                                ({msg.intentReasonTag})
-                              </>
+                              <> ({msg.intentReasonTag})</>
                             ) : null}
                           </div>
                           <button
@@ -1575,82 +1630,94 @@ export default function AnalyzePage() {
                         </div>
                       </div>
                     ) : (
-                    <div className="mt-3 rounded-md border border-brand-light/35 bg-brand-light/10 p-3">
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="text-[11px] font-semibold uppercase tracking-wide text-brand-dark/80">
-                          Intent Review
-                        </span>
-                        <span className="text-[11px] text-slate-600">
-                          predicted: <span className="font-semibold">{msg.predictedIntent}</span>{' '}
-                          ({msg.intentConfidence || 'low'})
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
-                        <select
-                          value={
-                            labelIntentDraft[msg.id] ||
-                            msg.trueIntent ||
-                            msg.predictedIntent
-                          }
-                          onChange={(e) =>
-                            setLabelIntentDraft((prev) => ({
-                              ...prev,
-                              [msg.id]: e.target.value as InvestigationIntent,
-                            }))
-                          }
-                          className="rounded border border-brand-light/50 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-brand-dark"
-                        >
-                          {INVESTIGATION_INTENTS.map((intent) => (
-                            <option key={`${msg.id}-${intent}`} value={intent}>
-                              {intent}
-                            </option>
-                          ))}
-                        </select>
+                      <div className="mt-3 rounded-md border border-brand-light/35 bg-brand-light/10 p-3">
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-[11px] font-semibold uppercase tracking-wide text-brand-dark/80">
+                            Intent Review
+                          </span>
+                          <span className="text-[11px] text-slate-600">
+                            predicted:{' '}
+                            <span className="font-semibold">
+                              {msg.predictedIntent}
+                            </span>{' '}
+                            ({msg.intentConfidence || 'low'})
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                          <select
+                            value={
+                              labelIntentDraft[msg.id] ||
+                              msg.trueIntent ||
+                              msg.predictedIntent
+                            }
+                            onChange={(e) =>
+                              setLabelIntentDraft((prev) => ({
+                                ...prev,
+                                [msg.id]: e.target.value as InvestigationIntent,
+                              }))
+                            }
+                            className="rounded border border-brand-light/50 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-brand-dark"
+                          >
+                            {INVESTIGATION_INTENTS.map((intent) => (
+                              <option
+                                key={`${msg.id}-${intent}`}
+                                value={intent}
+                              >
+                                {intent}
+                              </option>
+                            ))}
+                          </select>
 
-                        <select
-                          value={labelReasonDraft[msg.id] || msg.intentReasonTag || ''}
+                          <select
+                            value={
+                              labelReasonDraft[msg.id] ||
+                              msg.intentReasonTag ||
+                              ''
+                            }
+                            onChange={(e) =>
+                              setLabelReasonDraft((prev) => ({
+                                ...prev,
+                                [msg.id]: e.target.value,
+                              }))
+                            }
+                            className="rounded border border-brand-light/50 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-brand-dark"
+                          >
+                            <option value="">reason tag (optional)</option>
+                            {INTENT_REASON_TAGS.map((tag) => (
+                              <option key={`${msg.id}-${tag}`} value={tag}>
+                                {tag}
+                              </option>
+                            ))}
+                          </select>
+
+                          <button
+                            type="button"
+                            onClick={() => void saveIntentLabel(msg)}
+                            disabled={Boolean(labelSaving[msg.id])}
+                            className="inline-flex items-center justify-center gap-1 rounded border border-brand-light/40 bg-white px-2 py-1 text-[11px] font-semibold text-brand-dark hover:bg-brand-light/15 disabled:opacity-50"
+                          >
+                            {labelSaving[msg.id] ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Save className="w-3 h-3" />
+                            )}
+                            Save Label
+                          </button>
+                        </div>
+                        <input
+                          value={
+                            labelNotesDraft[msg.id] || msg.intentNotes || ''
+                          }
                           onChange={(e) =>
-                            setLabelReasonDraft((prev) => ({
+                            setLabelNotesDraft((prev) => ({
                               ...prev,
                               [msg.id]: e.target.value,
                             }))
                           }
-                          className="rounded border border-brand-light/50 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-brand-dark"
-                        >
-                          <option value="">reason tag (optional)</option>
-                          {INTENT_REASON_TAGS.map((tag) => (
-                            <option key={`${msg.id}-${tag}`} value={tag}>
-                              {tag}
-                            </option>
-                          ))}
-                        </select>
-
-                        <button
-                          type="button"
-                          onClick={() => void saveIntentLabel(msg)}
-                          disabled={Boolean(labelSaving[msg.id])}
-                          className="inline-flex items-center justify-center gap-1 rounded border border-brand-light/40 bg-white px-2 py-1 text-[11px] font-semibold text-brand-dark hover:bg-brand-light/15 disabled:opacity-50"
-                        >
-                          {labelSaving[msg.id] ? (
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                          ) : (
-                            <Save className="w-3 h-3" />
-                          )}
-                          Save Label
-                        </button>
+                          placeholder="Optional reviewer note"
+                          className="mt-2 w-full rounded border border-brand-light/50 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-brand-dark"
+                        />
                       </div>
-                      <input
-                        value={labelNotesDraft[msg.id] || msg.intentNotes || ''}
-                        onChange={(e) =>
-                          setLabelNotesDraft((prev) => ({
-                            ...prev,
-                            [msg.id]: e.target.value,
-                          }))
-                        }
-                        placeholder="Optional reviewer note"
-                        className="mt-2 w-full rounded border border-brand-light/50 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-brand-dark"
-                      />
-                    </div>
                     ))}
                   {msg.exportRequest &&
                     msg.records &&
@@ -1699,8 +1766,15 @@ export default function AnalyzePage() {
                             >
                               <summary className="flex cursor-pointer items-center justify-between text-slate-600 font-semibold">
                                 <span>
-                                  Relationship Flowchart ({msg.graph.meta?.nodeCount ?? msg.graph.nodes.length}{' '}
-                                  nodes, {msg.graph.meta?.edgeCount ?? (Array.isArray(msg.graph.edges) ? msg.graph.edges.length : 0)} edges)
+                                  Relationship Flowchart (
+                                  {msg.graph.meta?.nodeCount ??
+                                    msg.graph.nodes.length}{' '}
+                                  nodes,{' '}
+                                  {msg.graph.meta?.edgeCount ??
+                                    (Array.isArray(msg.graph.edges)
+                                      ? msg.graph.edges.length
+                                      : 0)}{' '}
+                                  edges)
                                 </span>
                                 <span className="text-[10px] uppercase tracking-wide text-slate-400">
                                   VIEW

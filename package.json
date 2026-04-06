@@ -9,7 +9,10 @@
     "lint": "eslint",
     "test:queries": "node scripts/query-validation.mjs",
     "test:queries:investigation": "CASES=tests/query-validation/cases.investigation.json node scripts/query-validation.mjs",
-    "test:llm-judge": "node scripts/llm-judge.mjs"
+    "test:llm-judge": "node scripts/llm-judge.mjs",
+    "test:llm-judge:extended": "CASES=tests/llm-judge/cases.extended.json node scripts/llm-judge.mjs",
+    "plot:llm-judge": "python3 scripts/plot_llm_judge.py",
+    "test:llm-judge:chart": "npm run test:llm-judge:extended && npm run plot:llm-judge"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

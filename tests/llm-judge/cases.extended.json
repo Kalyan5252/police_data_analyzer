@@ -1,0 +1,17 @@
+[
+  { "name": "Call activity day", "message": "call activity of 9542311767 on 2025-04-01" },
+  { "name": "Received calls follow-up", "message": "get me the calls that he received on the same date", "history": [{"role":"user","content":"call activity of 9542311767 on 2025-04-01"}] },
+  { "name": "Other events same date", "message": "what are other events happened of 7207733120 on same date", "history": [{"role":"user","content":"call activity of 7207733120 on 2025-04-01"}] },
+  { "name": "IP activity", "message": "get the activities of ip address 185.151.204.8" },
+  { "name": "IP events involved", "message": "in which events does the i.p address 163.70.138.62 involved" },
+  { "name": "Phone to internet session date", "message": "find the internet sesion of 919959473744 on 2025-04-07" },
+  { "name": "Phone to IP", "message": "ip address of 919959473744" },
+  { "name": "IMEI lookup", "message": "what is the imei of 9542311767" },
+  { "name": "Hidden link", "message": "get the link between 7989747580 and 8309250357" },
+  { "name": "Try-for hidden link", "message": "try for 9391616029 and 6304364216" },
+  { "name": "Co-location", "message": "are the numbers 9391616029 6304364216 located in same place at any time" },
+  { "name": "Events at cell", "message": "any events at cell id 405854221DE10 for 9391616029" },
+  { "name": "Event location lookup", "message": "location of 450b2dc3-bfed-419d-9994-5e16bf162808" },
+  { "name": "Phone to location path", "message": "do the phone number 9440331353 connected to tower cell_id 405854221DD10" },
+  { "name": "Most-called", "message": "to whom did this person having number 7989747580 called the most?" }
+]

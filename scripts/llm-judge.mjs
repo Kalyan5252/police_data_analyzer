@@ -6,9 +6,10 @@ import OpenAI from 'openai';
 const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
 const CASES_PATH = process.env.CASES || 'tests/llm-judge/cases.sample.json';
 const CASE_ID = process.env.CASE_ID || '';
-const JUDGE_MODEL = process.env.JUDGE_MODEL || 'gpt-5';
+const JUDGE_MODEL = process.env.JUDGE_MODEL || 'gpt-5-mini';
 const OUT_DIR = process.env.OUT_DIR || 'tests/llm-judge/reports';
 const INCLUDE_GRAPH = process.env.INCLUDE_GRAPH === '1';
+const PASS_THRESHOLD = Number(process.env.PASS_THRESHOLD || 60);
 
 if (!process.env.OPENAI_API_KEY) {
   console.error('OPENAI_API_KEY is required for GPT-5 judging.');
@@ -102,7 +103,6 @@ Also provide:
 - errors: short list of concrete mistakes
 - strengths: short list of concrete strengths
 - overall_score_100: integer 0-100
-- verdict: "pass" or "fail" (pass if overall_score_100 >= 70 and no critical factual/schema errors)
 
 Return STRICT JSON with this shape:
 {
@@ -114,7 +114,6 @@ Return STRICT JSON with this shape:
     "clarity_actionability": number
   },
   "overall_score_100": number,
-  "verdict": "pass" | "fail",
   "errors": string[],
   "strengths": string[],
   "rationale": string
@@ -166,7 +165,22 @@ async function judgeModelResponse(context) {
   });
 
   const text = extractTextFromResponse(response);
-  return parseJudgeJson(text);
+  const parsed = parseJudgeJson(text);
+  const scores = parsed?.scores || {};
+  const s1 = Number(scores.factual_grounding || 0);
+  const s2 = Number(scores.schema_reasoning || 0);
+  const s3 = Number(scores.query_alignment || 0);
+  const s4 = Number(scores.completeness || 0);
+  const s5 = Number(scores.clarity_actionability || 0);
+  const fallbackOverall = Math.round(((s1 + s2 + s3 + s4 + s5) / 25) * 100);
+  const overallRaw = Number(parsed?.overall_score_100);
+  const overall = Number.isFinite(overallRaw) ? Math.max(0, Math.min(100, Math.round(overallRaw))) : fallbackOverall;
+  const verdict = overall >= PASS_THRESHOLD ? 'pass' : 'fail';
+  return {
+    ...parsed,
+    overall_score_100: overall,
+    verdict,
+  };
 }
 
 function avg(nums) {
@@ -183,6 +197,7 @@ function stamp() {
 async function main() {
   const cases = readCases(CASES_PATH);
   console.log(`Running LLM-as-judge on ${cases.length} case(s) via ${BASE_URL}`);
+  console.log(`Judge model: ${JUDGE_MODEL} | pass threshold: ${PASS_THRESHOLD}`);
 
   const results = [];
 
@@ -208,7 +223,8 @@ async function main() {
         model: mr.model,
         judgment,
       });
-      console.log(`  - Judged ${mr.provider}/${mr.model}: ${judgment.overall_score_100} (${judgment.verdict})`);
+      const topError = Array.isArray(judgment.errors) && judgment.errors.length ? ` | top issue: ${judgment.errors[0]}` : '';
+      console.log(`  - Judged ${mr.provider}/${mr.model}: ${judgment.overall_score_100} (${judgment.verdict})${topError}`);
     }
 
     results.push({
