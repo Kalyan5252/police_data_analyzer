@@ -155,6 +155,9 @@ export async function POST(req: NextRequest) {
                 modelResponses: result.modelResponses,
                 candidateQueries: result.candidateQueries,
                 queryEvaluation: result.queryEvaluation,
+                predictedIntent: result.predictedIntent,
+                intentConfidence: result.intentConfidence,
+                strategyUsed: result.strategyUsed,
                 cacheHit: fromCache,
               });
             } catch (err: unknown) {
@@ -201,6 +204,9 @@ export async function POST(req: NextRequest) {
         modelResponses: result.modelResponses,
         candidateQueries: result.candidateQueries,
         queryEvaluation: result.queryEvaluation,
+        predictedIntent: result.predictedIntent,
+        intentConfidence: result.intentConfidence,
+        strategyUsed: result.strategyUsed,
         cacheHit: fromCache,
       },
       { status: 200 },

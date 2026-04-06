@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:queries": "node scripts/query-validation.mjs"
+    "test:queries": "node scripts/query-validation.mjs",
+    "test:queries:investigation": "CASES=tests/query-validation/cases.investigation.json node scripts/query-validation.mjs",
+    "test:llm-judge": "node scripts/llm-judge.mjs"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

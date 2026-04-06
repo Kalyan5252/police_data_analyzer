@@ -7,6 +7,7 @@ import {
   GraphPayload,
   serializeNeo4jRecord,
 } from '@/lib/graphPayload';
+import { IntentConfidence, InvestigationIntent } from '@/lib/investigationIntent';
 
 export type ConversationTurn = {
   role: 'user' | 'system';
@@ -36,6 +37,9 @@ export type InvestigationTurnResult = {
   modelResponses: LLMResponse[];
   candidateQueries?: string[];
   queryEvaluation?: string;
+  predictedIntent: InvestigationIntent;
+  intentConfidence: IntentConfidence;
+  strategyUsed: string;
 };
 
 type RunOptions = {
@@ -60,6 +64,11 @@ type QueryExecution = {
   records: Record<string, unknown>[];
   graph?: GraphPayload;
   error?: string;
+};
+
+type IntentPrediction = {
+  intent: InvestigationIntent;
+  confidence: IntentConfidence;
 };
 
 function buildHistoryContext(history: ConversationTurn[]): string {
@@ -745,6 +754,17 @@ function detectUnifiedActivityIntent(
   const asksActivity = /\bactivity\b|\bactivities\b|\bevents\b|\bevent\b/.test(q);
   if (!asksActivity) return null;
 
+  // IP activity should be handled by IP -> InternetSession intent, never by phone activity merge.
+  if (
+    /\bip\b/.test(q) ||
+    q.includes('ip address') ||
+    q.includes('i.p') ||
+    q.includes('internet session') ||
+    q.includes('session_id')
+  ) {
+    return null;
+  }
+
   // Let more specific intents handle this.
   if (/\bcall activity\b|\bcalls\b|\breceived\b|\bincoming\b|\boutgoing\b/.test(q)) {
     return null;
@@ -813,7 +833,7 @@ WITH ce_rows, collect(DISTINCT {
   cell_id: loc.cell_id
 }) AS pe_rows
 WITH ce_rows, pe_rows,
-  [c IN ce_rows | c + {matched: [p IN pe_rows WHERE p.norm_type = c.norm_type AND p.tod = c.tod][0]}] AS paired
+  [c IN ce_rows | c { .*, matched: head([p IN pe_rows WHERE p.norm_type = c.norm_type AND p.tod = c.tod]) }] AS paired
 WITH ce_rows, pe_rows, paired,
   [p IN pe_rows WHERE size([c IN ce_rows WHERE c.norm_type = p.norm_type AND c.tod = p.tod]) = 0] AS pe_only
 WITH
@@ -1002,6 +1022,29 @@ function detectPhoneToIpIntent(userQuery: string): { msisdn: string } | null {
   return { msisdn };
 }
 
+function detectPhoneInternetSessionIntent(
+  userQuery: string,
+  history: ConversationTurn[],
+): { msisdn: string; date?: string } | null {
+  const q = userQuery.toLowerCase();
+  const asksInternetSession =
+    q.includes('internet session') ||
+    q.includes('internet sesion') ||
+    q.includes('session of') ||
+    (q.includes('session') && q.includes('internet'));
+  if (!asksInternetSession) return null;
+
+  const msisdn = extractMsisdn(userQuery) || extractLatestMsisdnFromHistory(history);
+  if (!msisdn) return null;
+
+  const explicitDate = extractIsoDate(userQuery);
+  const sameDateRef = hasSameDateReference(userQuery);
+  const date =
+    explicitDate || (sameDateRef ? extractLatestDateFromHistory(history) : null) || undefined;
+
+  return { msisdn, date };
+}
+
 function extractIpAddress(userQuery: string): string | null {
   const ip = userQuery.match(
     /\b((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})\b/,
@@ -1012,12 +1055,17 @@ function extractIpAddress(userQuery: string): string | null {
 function detectIpToEventIntent(userQuery: string): { ip: string } | null {
   const q = userQuery.toLowerCase();
   const mentionsIpContext =
-    q.includes('ip address') || q.includes('ip') || q.includes('i.p');
+    q.includes('ip address') ||
+    q.includes('i.p address') ||
+    /\bip\b/.test(q) ||
+    q.includes('i.p');
   if (!mentionsIpContext) return null;
 
   const asksEvents =
     q.includes('event') ||
     q.includes('activity') ||
+    q.includes('activities') ||
+    q.includes('timeline') ||
     q.includes('involved') ||
     q.includes('session');
   if (!asksEvents) return null;
@@ -1045,7 +1093,7 @@ function buildIpToEventCandidates(ip: string): QueryCandidate[] {
       name: 'IP to internet sessions (direct)',
       strategy: 'intermediate_path',
       cypher: `MATCH (ip:IPAddress {ip: '${safeIp}'})<-[:CONNECTED_TO]-(is:InternetSession)
-RETURN is.session_id AS event_id, is.start_time AS start_time, is.end_time AS end_time, 'InternetSession' AS event_type
+RETURN is.session_id AS session_id, is.start_time AS start_time, is.end_time AS end_time
 LIMIT 200`,
     },
     {
@@ -1090,6 +1138,47 @@ MATCH pth = shortestPath((p)-[*1..4]-(ip))
 WHERE ANY(n IN nodes(pth) WHERE n:InternetSession)
 RETURN pth
 LIMIT ${PATH_RETURN_LIMIT}`,
+    },
+  ];
+}
+
+function buildPhoneInternetSessionCandidates(
+  msisdn: string,
+  date?: string,
+): QueryCandidate[] {
+  const safeMsisdn = escapeCypherLiteral(msisdn);
+  const safeDate = date ? escapeCypherLiteral(date) : '';
+  const dateFilter = date
+    ? `AND (
+  toString(is.start_time) STARTS WITH '${safeDate}'
+  OR toString(is.end_time) STARTS WITH '${safeDate}'
+)`
+    : '';
+
+  return [
+    {
+      name: 'Phone to internet sessions (USED relation)',
+      strategy: 'intermediate_path',
+      cypher: `MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'})-[:USED]->(is:InternetSession)
+WHERE is.session_id IS NOT NULL
+  ${dateFilter}
+OPTIONAL MATCH (is)-[:CONNECTED_TO]->(ip:IPAddress)
+OPTIONAL MATCH (is)-[:USED_DEVICE]->(d:Device)
+RETURN is.session_id AS session_id, is.start_time AS start_time, is.end_time AS end_time, collect(DISTINCT ip.ip) AS ip_addresses, collect(DISTINCT d.imei) AS device_imeis
+ORDER BY is.start_time ASC
+LIMIT 300`,
+    },
+    {
+      name: 'Phone to internet sessions (undirected fallback)',
+      strategy: 'all_paths',
+      cypher: `MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'})-[r:USED]-(is:InternetSession)
+WHERE is.session_id IS NOT NULL
+  ${dateFilter}
+OPTIONAL MATCH (is)-[rc:CONNECTED_TO]-(ip:IPAddress)
+OPTIONAL MATCH (is)-[rd:USED_DEVICE]-(d:Device)
+RETURN is.session_id AS session_id, is.start_time AS start_time, is.end_time AS end_time, collect(DISTINCT ip.ip) AS ip_addresses, collect(DISTINCT d.imei) AS device_imeis, type(r) AS phone_session_rel, collect(DISTINCT type(rc)) AS ip_rel_types, collect(DISTINCT type(rd)) AS device_rel_types
+ORDER BY is.start_time ASC
+LIMIT 300`,
     },
   ];
 }
@@ -1415,6 +1504,82 @@ async function synthesizeFinalAnswer(
   return synth.content.trim();
 }
 
+function detectFlowchartIntent(userQuery: string): boolean {
+  return /flow\s*chart|flowchart|diagram|visuali[sz]e|relationship graph|graph view|show graph|node graph|mermaid/i.test(
+    userQuery,
+  );
+}
+
+function predictIntentFromSignals(signals: {
+  eventLocationIntent: ReturnType<typeof detectEventLocationIntent>;
+  unifiedActivityIntent: ReturnType<typeof detectUnifiedActivityIntent>;
+  eventsAtCellIntent: ReturnType<typeof detectPhoneEventsAtCellIntent>;
+  coLocationFollowUpIntent: ReturnType<typeof detectCoLocationTimeFollowUpIntent>;
+  coLocationIntent: ReturnType<typeof detectCoLocationIntent>;
+  eventsOnDateIntent: ReturnType<typeof detectEventsOnSameDateFollowUpIntent>;
+  receivedFollowUpIntent: ReturnType<typeof detectReceivedCallsOnDateFollowUpIntent>;
+  callActivityIntent: ReturnType<typeof detectCallActivityIntent>;
+  phonePhoneIntent: ReturnType<typeof detectPhoneToPhoneLinkIntent>;
+  pathIntent: ReturnType<typeof detectPhoneToLocationPathIntent>;
+  imeiIntent: ReturnType<typeof detectPhoneToImeiIntent>;
+  phoneInternetSessionIntent: ReturnType<typeof detectPhoneInternetSessionIntent>;
+  phoneIpIntent: ReturnType<typeof detectPhoneToIpIntent>;
+  ipEventIntent: ReturnType<typeof detectIpToEventIntent>;
+  genericIntent: ReturnType<typeof detectGenericComplexRelationshipIntent>;
+  userQuery: string;
+}): IntentPrediction {
+  if (signals.eventLocationIntent) {
+    return { intent: 'event_location_lookup', confidence: 'high' };
+  }
+  if (signals.eventsAtCellIntent) {
+    return { intent: 'events_at_cell', confidence: 'high' };
+  }
+  if (signals.coLocationFollowUpIntent || signals.coLocationIntent) {
+    return { intent: 'co_location', confidence: 'high' };
+  }
+  if (signals.eventsOnDateIntent) {
+    return { intent: 'events_on_date', confidence: 'high' };
+  }
+  if (signals.receivedFollowUpIntent) {
+    return { intent: 'received_calls_on_date', confidence: 'high' };
+  }
+  if (signals.callActivityIntent) {
+    return { intent: 'call_activity', confidence: 'high' };
+  }
+  if (signals.unifiedActivityIntent) {
+    const q = signals.userQuery.toLowerCase();
+    if (/sms|message|text/.test(q)) return { intent: 'message_activity', confidence: 'high' };
+    if (/video|vdo/.test(q)) return { intent: 'video_activity', confidence: 'high' };
+    if (/call/.test(q)) return { intent: 'call_activity', confidence: 'high' };
+    return { intent: 'events_on_date', confidence: 'medium' };
+  }
+  if (signals.phonePhoneIntent) {
+    return { intent: 'hidden_link_phone_phone', confidence: 'high' };
+  }
+  if (signals.pathIntent) {
+    return { intent: 'phone_to_location_path', confidence: 'high' };
+  }
+  if (signals.imeiIntent) {
+    return { intent: 'phone_to_imei', confidence: 'high' };
+  }
+  if (signals.phoneInternetSessionIntent) {
+    return { intent: 'phone_to_ip', confidence: 'high' };
+  }
+  if (signals.phoneIpIntent) {
+    return { intent: 'phone_to_ip', confidence: 'high' };
+  }
+  if (signals.ipEventIntent) {
+    return { intent: 'ip_to_events', confidence: 'high' };
+  }
+  if (signals.genericIntent) {
+    return { intent: 'generic_relationship', confidence: 'medium' };
+  }
+  if (detectFlowchartIntent(signals.userQuery)) {
+    return { intent: 'flowchart_request', confidence: 'medium' };
+  }
+  return { intent: 'other', confidence: 'low' };
+}
+
 export async function runInvestigationTurn(
   userQuery: string,
   options: RunOptions = {},
@@ -1454,6 +1619,9 @@ export async function runInvestigationTurn(
       cypher: '',
       records: [],
       modelResponses: [resp],
+      predictedIntent: 'other',
+      intentConfidence: 'low',
+      strategyUsed: 'small_talk',
     };
   }
 
@@ -1488,9 +1656,31 @@ export async function runInvestigationTurn(
   const phonePhoneIntent = detectPhoneToPhoneLinkIntent(userQuery);
   const pathIntent = detectPhoneToLocationPathIntent(userQuery);
   const imeiIntent = detectPhoneToImeiIntent(userQuery);
+  const phoneInternetSessionIntent = detectPhoneInternetSessionIntent(
+    userQuery,
+    options.history ?? [],
+  );
   const phoneIpIntent = detectPhoneToIpIntent(userQuery);
   const ipEventIntent = detectIpToEventIntent(userQuery);
   const genericIntent = detectGenericComplexRelationshipIntent(userQuery);
+  const intentPrediction = predictIntentFromSignals({
+    eventLocationIntent,
+    unifiedActivityIntent,
+    eventsAtCellIntent,
+    coLocationFollowUpIntent,
+    coLocationIntent,
+    eventsOnDateIntent,
+    receivedFollowUpIntent,
+    callActivityIntent,
+    phonePhoneIntent,
+    pathIntent,
+    imeiIntent,
+    phoneInternetSessionIntent,
+    phoneIpIntent,
+    ipEventIntent,
+    genericIntent,
+    userQuery,
+  });
   let candidateQueries: QueryCandidate[] = [];
   if (eventLocationIntent) {
     candidateQueries = [
@@ -1503,6 +1693,12 @@ export async function runInvestigationTurn(
     await emit({
       stage: 'planning_query',
       message: `Detected event-location intent for event ${eventLocationIntent.eventId}. Querying both CommunicationEvent and PresenceEvent evidence paths.`,
+    });
+  } else if (ipEventIntent) {
+    candidateQueries = buildIpToEventCandidates(ipEventIntent.ip);
+    await emit({
+      stage: 'planning_query',
+      message: `Detected IP-to-event intent for ${ipEventIntent.ip}. Prioritizing InternetSession evidence queries.`,
     });
   } else if (unifiedActivityIntent) {
     candidateQueries = [
@@ -1631,17 +1827,20 @@ export async function runInvestigationTurn(
       stage: 'planning_query',
       message: `Detected IMEI lookup intent for phone ${imeiIntent.msisdn}. Using bounded indirect traversal to Device nodes.`,
     });
+  } else if (phoneInternetSessionIntent) {
+    candidateQueries = buildPhoneInternetSessionCandidates(
+      phoneInternetSessionIntent.msisdn,
+      phoneInternetSessionIntent.date,
+    );
+    await emit({
+      stage: 'planning_query',
+      message: `Detected internet-session intent for ${phoneInternetSessionIntent.msisdn}${phoneInternetSessionIntent.date ? ` on ${phoneInternetSessionIntent.date}` : ''}. Using PhoneNumber-USED->InternetSession with IP and device enrichment.`,
+    });
   } else if (phoneIpIntent) {
     candidateQueries = buildPhoneToIpCandidates(phoneIpIntent.msisdn);
     await emit({
       stage: 'planning_query',
       message: `Detected phone-to-IP intent for ${phoneIpIntent.msisdn}. Prioritizing InternetSession bridge queries.`,
-    });
-  } else if (ipEventIntent) {
-    candidateQueries = buildIpToEventCandidates(ipEventIntent.ip);
-    await emit({
-      stage: 'planning_query',
-      message: `Detected IP-to-event intent for ${ipEventIntent.ip}. Prioritizing InternetSession evidence queries.`,
     });
   } else if (genericIntent) {
     candidateQueries = buildGenericRelationshipCandidates(
@@ -1823,5 +2022,8 @@ export async function runInvestigationTurn(
     modelResponses,
     candidateQueries: candidateQueries.map((q) => q.cypher),
     queryEvaluation,
+    predictedIntent: intentPrediction.intent,
+    intentConfidence: intentPrediction.confidence,
+    strategyUsed: evaluation.best.candidate.strategy,
   };
 }

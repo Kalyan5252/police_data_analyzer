@@ -16,10 +16,18 @@ import {
   CheckCircle2,
   Sparkles,
   Download,
+  BarChart3,
+  Save,
 } from 'lucide-react';
 import MarkdownMessage from '@/components/MarkdownMessage';
 import { extractGraphFromRecords, GraphPayload } from '@/lib/graphPayload';
 import { graphToMermaidFlowchart } from '@/lib/graphFlowchart';
+import {
+  IntentConfidence,
+  InvestigationIntent,
+  INTENT_REASON_TAGS,
+  INVESTIGATION_INTENTS,
+} from '@/lib/investigationIntent';
 
 type LLMOpinion = {
   provider: string;
@@ -54,6 +62,14 @@ type Message = {
   modelResponses?: LLMOpinion[];
   error?: boolean;
   exportRequest?: ExportRequestInfo;
+  predictedIntent?: InvestigationIntent;
+  intentConfidence?: IntentConfidence;
+  strategyUsed?: string;
+  trueIntent?: InvestigationIntent;
+  intentReasonTag?: string;
+  intentNotes?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
 };
 
 type ProgressStage =
@@ -100,6 +116,29 @@ type StreamFinalPayload = {
   records?: Record<string, unknown>[];
   graph?: GraphPayload;
   modelResponses?: LLMOpinion[];
+  predictedIntent?: InvestigationIntent;
+  intentConfidence?: IntentConfidence;
+  strategyUsed?: string;
+};
+
+type ConfusionMatrixPayload = {
+  success: boolean;
+  labels: InvestigationIntent[];
+  matrix: Array<{ trueIntent: InvestigationIntent; predictedIntent: InvestigationIntent; count: number }>;
+  stats: Array<{
+    intent: InvestigationIntent;
+    support: number;
+    predictedCount: number;
+    truePositive: number;
+    precision: number;
+    recall: number;
+    f1: number;
+  }>;
+  macro: { precision: number; recall: number; f1: number };
+  micro: { precision: number; recall: number; f1: number };
+  totalLabeled: number;
+  topConfusions: Array<{ trueIntent: InvestigationIntent; predictedIntent: InvestigationIntent; count: number }>;
+  unresolvedLabelCount: number;
 };
 
 function getTimestamp() {
@@ -582,6 +621,24 @@ export default function AnalyzePage() {
     null,
   );
   const [showSuggestions, setShowSuggestions] = useState(true);
+  const [showModelQuality, setShowModelQuality] = useState(false);
+  const [matrixData, setMatrixData] = useState<ConfusionMatrixPayload | null>(
+    null,
+  );
+  const [matrixLoading, setMatrixLoading] = useState(false);
+  const [labelIntentDraft, setLabelIntentDraft] = useState<
+    Record<string, InvestigationIntent>
+  >({});
+  const [labelReasonDraft, setLabelReasonDraft] = useState<
+    Record<string, string>
+  >({});
+  const [labelNotesDraft, setLabelNotesDraft] = useState<Record<string, string>>(
+    {},
+  );
+  const [labelSaving, setLabelSaving] = useState<Record<string, boolean>>({});
+  const [editReviewedLabel, setEditReviewedLabel] = useState<
+    Record<string, boolean>
+  >({});
 
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -628,6 +685,18 @@ export default function AnalyzePage() {
       createdAt: msg.createdAt || getMessageCreatedAt(),
     }));
 
+    const nextIntentDraft: Record<string, InvestigationIntent> = {};
+    const nextReasonDraft: Record<string, string> = {};
+    const nextNotesDraft: Record<string, string> = {};
+    for (const msg of loaded) {
+      if (msg.trueIntent) nextIntentDraft[msg.id] = msg.trueIntent;
+      if (msg.intentReasonTag) nextReasonDraft[msg.id] = msg.intentReasonTag;
+      if (msg.intentNotes) nextNotesDraft[msg.id] = msg.intentNotes;
+    }
+    setLabelIntentDraft(nextIntentDraft);
+    setLabelReasonDraft(nextReasonDraft);
+    setLabelNotesDraft(nextNotesDraft);
+
     if (loaded.length === 0) {
       setMessages([getWelcomeMessage()]);
     } else {
@@ -652,8 +721,80 @@ export default function AnalyzePage() {
         queryEvaluation: message.queryEvaluation,
         modelResponses: message.modelResponses,
         error: Boolean(message.error),
+        predictedIntent: message.predictedIntent,
+        intentConfidence: message.intentConfidence,
+        strategyUsed: message.strategyUsed,
       }),
     });
+  };
+
+  const loadConfusionMatrix = async (caseId: string) => {
+    setMatrixLoading(true);
+    try {
+      const res = await fetch(
+        `/api/metrics/confusion-matrix?caseId=${encodeURIComponent(caseId)}`,
+        { cache: 'no-store' },
+      );
+      const data = (await res.json()) as ConfusionMatrixPayload;
+      if (!res.ok || !data.success) {
+        throw new Error('Failed to load confusion matrix.');
+      }
+      setMatrixData(data);
+    } catch {
+      setMatrixData(null);
+    } finally {
+      setMatrixLoading(false);
+    }
+  };
+
+  const saveIntentLabel = async (msg: Message) => {
+    if (!msg.id || !activeCaseId) return;
+    const trueIntent =
+      labelIntentDraft[msg.id] || msg.trueIntent || msg.predictedIntent;
+    if (!trueIntent) return;
+
+    setLabelSaving((prev) => ({ ...prev, [msg.id]: true }));
+    try {
+      const reasonTag = labelReasonDraft[msg.id] || msg.intentReasonTag || '';
+      const notes = labelNotesDraft[msg.id] || msg.intentNotes || '';
+      const res = await fetch('/api/metrics/intent-label', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messageId: msg.id,
+          trueIntent,
+          reasonTag: reasonTag || undefined,
+          notes: notes || undefined,
+          predictedIntent: msg.predictedIntent || 'other',
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || 'Failed to save label.');
+      }
+      await loadCaseMessages(activeCaseId);
+      await loadConfusionMatrix(activeCaseId);
+      setEditReviewedLabel((prev) => ({ ...prev, [msg.id]: false }));
+      window.dispatchEvent(new Event('case-history-updated'));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to save label.';
+      const errorMsg: Message = {
+        id: createMessageId('label-error'),
+        role: 'system',
+        content: `Label save failed: ${message}`,
+        timestamp: getTimestamp(),
+        createdAt: getMessageCreatedAt(),
+        error: true,
+      };
+      setMessages((prev) => [...prev, errorMsg]);
+      if (activeCaseId) {
+        void persistMessage(activeCaseId, errorMsg).then(() =>
+          window.dispatchEvent(new Event('case-history-updated')),
+        );
+      }
+    } finally {
+      setLabelSaving((prev) => ({ ...prev, [msg.id]: false }));
+    }
   };
 
   const loadLatestSystemMessageFromDb = async (
@@ -712,6 +853,7 @@ export default function AnalyzePage() {
         if (!selectedCaseId || ignore) return;
         setActiveCaseId(selectedCaseId);
         await loadCaseMessages(selectedCaseId);
+        await loadConfusionMatrix(selectedCaseId);
       } catch {
         if (!ignore) {
           setMessages([getWelcomeMessage()]);
@@ -878,6 +1020,9 @@ export default function AnalyzePage() {
               timestamp: getTimestamp(),
               createdAt: getMessageCreatedAt(),
               graph: derivedGraph,
+              predictedIntent: 'flowchart_request',
+              intentConfidence: 'high',
+              strategyUsed: 'flowchart_from_history',
             };
             setMessages((prev) => [...prev, chartMsg]);
             void persistMessage(activeCaseId, chartMsg).then(() =>
@@ -895,6 +1040,9 @@ export default function AnalyzePage() {
           timestamp: getTimestamp(),
           createdAt: getMessageCreatedAt(),
           error: true,
+          predictedIntent: 'flowchart_request',
+          intentConfidence: 'high',
+          strategyUsed: 'flowchart_from_history',
         };
         setMessages((prev) => [...prev, noDataMsg]);
         void persistMessage(activeCaseId, noDataMsg).then(() =>
@@ -954,6 +1102,9 @@ export default function AnalyzePage() {
             createdAt: getMessageCreatedAt(),
             records: data.records,
             graph: data.graph,
+            predictedIntent: 'other',
+            intentConfidence: 'low',
+            strategyUsed: 'direct_cypher',
             exportRequest:
               requestedExportFormat && data.records?.length
                 ? {
@@ -1062,6 +1213,9 @@ export default function AnalyzePage() {
               candidateQueries: payload.candidateQueries,
               queryEvaluation: payload.queryEvaluation,
               modelResponses: payload.modelResponses,
+              predictedIntent: payload.predictedIntent || 'other',
+              intentConfidence: payload.intentConfidence || 'low',
+              strategyUsed: payload.strategyUsed || 'llm_generated',
               exportRequest:
                 requestedExportFormat && payload.records?.length
                   ? {
@@ -1138,6 +1292,18 @@ export default function AnalyzePage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setShowModelQuality((prev) => !prev)}
+            className={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${
+              showModelQuality
+                ? 'border-brand-dark bg-brand-dark text-white'
+                : 'border-brand-light/35 bg-white text-brand-dark hover:bg-brand-light/10'
+            }`}
+          >
+            <BarChart3 className="w-4 h-4" />
+            Model Quality
+          </button>
           {activeCaseId && (
             <div className="flex items-center gap-2 px-3 py-1.5 bg-white text-brand-dark rounded-md border border-brand-light/35">
               <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
@@ -1172,6 +1338,134 @@ export default function AnalyzePage() {
 
         {/* Foreground Chat Content */}
         <div className="relative flex flex-col gap-6">
+          {showModelQuality && (
+            <section className="rounded-xl border border-brand-light/30 bg-white p-4 shadow-sm">
+              <div className="mb-3 flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-bold text-brand-dark">
+                    Model Quality Metrics
+                  </h2>
+                  <p className="text-[11px] text-slate-500">
+                    Reviewer-labeled intent confusion metrics for this case.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activeCaseId) {
+                      void loadConfusionMatrix(activeCaseId);
+                    }
+                  }}
+                  disabled={matrixLoading || !activeCaseId}
+                  className="inline-flex items-center gap-2 rounded-md border border-brand-light/35 bg-white px-3 py-1.5 text-xs font-semibold text-brand-dark hover:bg-brand-light/10 disabled:opacity-50"
+                >
+                  {matrixLoading ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <BarChart3 className="w-3.5 h-3.5" />
+                  )}
+                  Refresh
+                </button>
+              </div>
+
+              {!matrixData ? (
+                <div className="rounded-md border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                  No matrix data yet.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
+                    <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                      <div className="text-slate-500">Labeled</div>
+                      <div className="text-sm font-semibold text-brand-dark">
+                        {matrixData.totalLabeled}
+                      </div>
+                    </div>
+                    <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                      <div className="text-slate-500">Unlabeled</div>
+                      <div className="text-sm font-semibold text-brand-dark">
+                        {matrixData.unresolvedLabelCount}
+                      </div>
+                    </div>
+                    <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                      <div className="text-slate-500">Macro F1</div>
+                      <div className="text-sm font-semibold text-brand-dark">
+                        {matrixData.macro.f1}
+                      </div>
+                    </div>
+                    <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                      <div className="text-slate-500">Micro F1</div>
+                      <div className="text-sm font-semibold text-brand-dark">
+                        {matrixData.micro.f1}
+                      </div>
+                    </div>
+                    <div className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                      <div className="text-slate-500">Macro Recall</div>
+                      <div className="text-sm font-semibold text-brand-dark">
+                        {matrixData.macro.recall}
+                      </div>
+                    </div>
+                  </div>
+
+                  <details className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                    <summary className="cursor-pointer font-semibold text-slate-700">
+                      Per-intent Precision / Recall / F1
+                    </summary>
+                    <div className="mt-2 max-h-64 overflow-auto rounded border border-slate-200 bg-white">
+                      <table className="min-w-full border-collapse text-[11px]">
+                        <thead className="bg-slate-100">
+                          <tr>
+                            <th className="border-b border-slate-200 px-2 py-1 text-left">Intent</th>
+                            <th className="border-b border-slate-200 px-2 py-1 text-left">Support</th>
+                            <th className="border-b border-slate-200 px-2 py-1 text-left">Precision</th>
+                            <th className="border-b border-slate-200 px-2 py-1 text-left">Recall</th>
+                            <th className="border-b border-slate-200 px-2 py-1 text-left">F1</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {matrixData.stats
+                            .filter((s) => s.support > 0 || s.predictedCount > 0)
+                            .map((s) => (
+                              <tr key={`stat-${s.intent}`} className="odd:bg-white even:bg-slate-50">
+                                <td className="border-b border-slate-100 px-2 py-1">{s.intent}</td>
+                                <td className="border-b border-slate-100 px-2 py-1">{s.support}</td>
+                                <td className="border-b border-slate-100 px-2 py-1">{s.precision}</td>
+                                <td className="border-b border-slate-100 px-2 py-1">{s.recall}</td>
+                                <td className="border-b border-slate-100 px-2 py-1">{s.f1}</td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+
+                  <details className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                    <summary className="cursor-pointer font-semibold text-slate-700">
+                      Top Intent Confusions
+                    </summary>
+                    <div className="mt-2 space-y-1">
+                      {matrixData.topConfusions.length === 0 ? (
+                        <p className="text-[11px] text-slate-500">
+                          No cross-intent confusion records yet.
+                        </p>
+                      ) : (
+                        matrixData.topConfusions.map((c, idx) => (
+                          <div
+                            key={`${c.trueIntent}-${c.predictedIntent}-${idx}`}
+                            className="rounded border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                          >
+                            true: <span className="font-semibold">{c.trueIntent}</span> {'->'} predicted:{' '}
+                            <span className="font-semibold">{c.predictedIntent}</span> ({c.count})
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </details>
+                </div>
+              )}
+            </section>
+          )}
+
           {isCaseLoading && (
             <div className="flex w-full justify-start">
               <div className="max-w-[85%] rounded-xl border border-brand-light/30 bg-white px-4 py-3 text-sm text-slate-600 shadow-sm flex items-center gap-2">
@@ -1250,6 +1544,114 @@ export default function AnalyzePage() {
                       content={msg.content}
                     />
                   )}
+                  {msg.role === 'system' &&
+                    !msg.error &&
+                    msg.predictedIntent &&
+                    (msg.trueIntent && !editReviewedLabel[msg.id] ? (
+                      <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-[11px] text-emerald-800">
+                            Reviewed intent:{' '}
+                            <span className="font-semibold">{msg.trueIntent}</span>
+                            {msg.intentReasonTag ? (
+                              <>
+                                {' '}
+                                ({msg.intentReasonTag})
+                              </>
+                            ) : null}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setEditReviewedLabel((prev) => ({
+                                ...prev,
+                                [msg.id]: true,
+                              }))
+                            }
+                            className="rounded border border-emerald-300 bg-white px-2 py-1 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-100"
+                          >
+                            Re-label
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                    <div className="mt-3 rounded-md border border-brand-light/35 bg-brand-light/10 p-3">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="text-[11px] font-semibold uppercase tracking-wide text-brand-dark/80">
+                          Intent Review
+                        </span>
+                        <span className="text-[11px] text-slate-600">
+                          predicted: <span className="font-semibold">{msg.predictedIntent}</span>{' '}
+                          ({msg.intentConfidence || 'low'})
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                        <select
+                          value={
+                            labelIntentDraft[msg.id] ||
+                            msg.trueIntent ||
+                            msg.predictedIntent
+                          }
+                          onChange={(e) =>
+                            setLabelIntentDraft((prev) => ({
+                              ...prev,
+                              [msg.id]: e.target.value as InvestigationIntent,
+                            }))
+                          }
+                          className="rounded border border-brand-light/50 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-brand-dark"
+                        >
+                          {INVESTIGATION_INTENTS.map((intent) => (
+                            <option key={`${msg.id}-${intent}`} value={intent}>
+                              {intent}
+                            </option>
+                          ))}
+                        </select>
+
+                        <select
+                          value={labelReasonDraft[msg.id] || msg.intentReasonTag || ''}
+                          onChange={(e) =>
+                            setLabelReasonDraft((prev) => ({
+                              ...prev,
+                              [msg.id]: e.target.value,
+                            }))
+                          }
+                          className="rounded border border-brand-light/50 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-brand-dark"
+                        >
+                          <option value="">reason tag (optional)</option>
+                          {INTENT_REASON_TAGS.map((tag) => (
+                            <option key={`${msg.id}-${tag}`} value={tag}>
+                              {tag}
+                            </option>
+                          ))}
+                        </select>
+
+                        <button
+                          type="button"
+                          onClick={() => void saveIntentLabel(msg)}
+                          disabled={Boolean(labelSaving[msg.id])}
+                          className="inline-flex items-center justify-center gap-1 rounded border border-brand-light/40 bg-white px-2 py-1 text-[11px] font-semibold text-brand-dark hover:bg-brand-light/15 disabled:opacity-50"
+                        >
+                          {labelSaving[msg.id] ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Save className="w-3 h-3" />
+                          )}
+                          Save Label
+                        </button>
+                      </div>
+                      <input
+                        value={labelNotesDraft[msg.id] || msg.intentNotes || ''}
+                        onChange={(e) =>
+                          setLabelNotesDraft((prev) => ({
+                            ...prev,
+                            [msg.id]: e.target.value,
+                          }))
+                        }
+                        placeholder="Optional reviewer note"
+                        className="mt-2 w-full rounded border border-brand-light/50 bg-white px-2 py-1 text-[11px] text-slate-700 outline-none focus:border-brand-dark"
+                      />
+                    </div>
+                    ))}
                   {msg.exportRequest &&
                     msg.records &&
                     msg.records.length > 0 && (

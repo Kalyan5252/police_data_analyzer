@@ -1,0 +1,101 @@
+[
+  {
+    "name": "Call activity must fetch both CE and PE",
+    "message": "get the call activity of 7989747580",
+    "expectAll": ["CommunicationEvent", "PresenceEvent", "SEEN_AT"],
+    "forbidAny": ["MATCH (p:PhoneNumber {msisdn: '7989747580'})-[:INITIATED|TARGET]-(ce:CommunicationEvent)\nWHERE ce.type IN ['CALL-IN', 'CALL-OUT']"]
+  },
+  {
+    "name": "Received calls same-date follow-up should resolve prior context",
+    "message": "get me the calls that he received on the same date",
+    "history": [
+      { "role": "user", "content": "call activity of 9542311767 on 2025-04-01" }
+    ],
+    "expectAny": ["CALL-IN", "STARTS WITH '2025-04-01'", "PresenceEvent"],
+    "forbidAny": ["date(\"2025-04-01 00:00:00", "date('2025-04-01 00:00:00", "datetime('2025-04-01 00:00:00 22:"]
+  },
+  {
+    "name": "Other events same-date follow-up should avoid temporal parse pitfalls",
+    "message": "what are other events happened of 7207733120 on same date",
+    "history": [
+      { "role": "user", "content": "call activity of 7207733120 on 2025-04-01" }
+    ],
+    "expectAny": ["STARTS WITH '2025-04-01'", "event_type", "counterpart_numbers"],
+    "forbidAny": ["date('2025-04-01 00:00:00", "datetime('2025-04-01 00:00:00", "Text cannot be parsed to a Date"]
+  },
+  {
+    "name": "IP involved events should route to InternetSession",
+    "message": "in which events does the i.p address 163.70.138.62 involved",
+    "expectAll": ["IPAddress", "InternetSession", "CONNECTED_TO", "session_id"],
+    "forbidAny": ["CommunicationEvent"],
+    "forbidMode": "all"
+  },
+  {
+    "name": "Phone to IP should use InternetSession bridge",
+    "message": "ip address of 919959473744",
+    "expectAll": ["PhoneNumber", "USED", "InternetSession", "IPAddress"],
+    "forbidAny": ["(d:Device)", "-[:USED]->(ip:IPAddress)"]
+  },
+  {
+    "name": "IMEI lookup should allow indirect path via PresenceEvent",
+    "message": "what is the imei of 9542311767",
+    "expectAny": ["Device", "imei", "SEEN_AT", "USED_DEVICE"],
+    "forbidAny": ["RETURN p, d", "no recorded device linked"],
+    "forbidMode": "all"
+  },
+  {
+    "name": "Phone-phone hidden link should include shortest path strategy",
+    "message": "get the link between 7989747580 and 8309250357",
+    "expectAll": ["shortestPath", "[*1..", "relationship_chain"],
+    "expectAny": ["common_cell_ids", "temporal_overlap_count", "co_location_evidence"]
+  },
+  {
+    "name": "Try for two numbers should still trigger hidden-link candidate set",
+    "message": "try for 9391616029 and 6304364216",
+    "expectAll": ["shortestPath", "relationship_chain"],
+    "expectAny": ["common_cell_ids", "co_location_evidence"]
+  },
+  {
+    "name": "Co-location query must use PresenceEvent timestamps",
+    "message": "are the numbers 9391616029 6304364216 located in same place at any time",
+    "expectAll": ["PresenceEvent", "AT_LOCATION", "a_timestamps", "b_timestamps"],
+    "forbidAny": ["no specific timestamps", "no time records"],
+    "forbidMode": "all"
+  },
+  {
+    "name": "Co-location follow-up time should resolve pronouns from history",
+    "message": "at what did they both located at that cell id",
+    "history": [
+      { "role": "user", "content": "are the numbers 9391616029 6304364216 located in same place at any time" },
+      { "role": "system", "content": "Common Cell ID: 405854221DE10" }
+    ],
+    "expectAny": ["405854221DE10", "a_timestamps", "b_timestamps", "matched_time_of_day"],
+    "forbidAny": ["no specific timestamps", "no time records"],
+    "forbidMode": "all"
+  },
+  {
+    "name": "Events at cell should correlate CE with PE timestamps",
+    "message": "any events at cell id 405854221DE10 for 9391616029",
+    "expectAll": ["CommunicationEvent", "PresenceEvent", "AT_LOCATION", "matched_presence_timestamp"],
+    "forbidAny": ["(ce:CommunicationEvent)-[:SEEN_AT]-(pe:PresenceEvent)"],
+    "forbidMode": "any"
+  },
+  {
+    "name": "Event location lookup should support UUID",
+    "message": "location of 450b2dc3-bfed-419d-9994-5e16bf162808",
+    "expectAny": ["CommunicationEvent", "PresenceEvent", "inferred_cell_ids", "matched_presence_event_ids"]
+  },
+  {
+    "name": "Phone-location path traversal should be bounded multi-hop",
+    "message": "do the phone number 9440331353 connected to tower cell_id 405854221DD10",
+    "expectAny": ["[*1..", "PhoneNumber", "Location", "cell_id", "msisdn"],
+    "forbidAny": ["MATCH (a {phone_number:'9440331353'})"],
+    "forbidMode": "all"
+  },
+  {
+    "name": "Most-called counterpart intent should use aggregation",
+    "message": "to whom did this person having number 7989747580 called the most?",
+    "expectAny": ["count(", "ORDER BY", "DESC", "LIMIT"],
+    "expectAll": ["CommunicationEvent", "PhoneNumber"]
+  }
+]

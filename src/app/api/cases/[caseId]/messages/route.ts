@@ -2,6 +2,12 @@ import { randomUUID } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { pgQuery, withPgClient } from '@/lib/postgres';
 import { GraphPayload } from '@/lib/graphPayload';
+import {
+  IntentConfidence,
+  InvestigationIntent,
+  isIntentConfidence,
+  isInvestigationIntent,
+} from '@/lib/investigationIntent';
 
 type StoredMessage = {
   id: string;
@@ -16,6 +22,14 @@ type StoredMessage = {
   queryEvaluation?: string;
   modelResponses?: unknown[];
   error?: boolean;
+  predictedIntent?: InvestigationIntent;
+  intentConfidence?: IntentConfidence;
+  strategyUsed?: string;
+  trueIntent?: InvestigationIntent;
+  intentReasonTag?: string;
+  intentNotes?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
 };
 
 export async function GET(
@@ -34,6 +48,11 @@ export async function GET(
       content: string;
       timestamp: string;
       createdAt: string;
+      trueIntent?: string | null;
+      intentReasonTag?: string | null;
+      intentNotes?: string | null;
+      reviewedBy?: string | null;
+      reviewedAt?: string | null;
       payload: {
         records?: Record<string, unknown>[];
         graph?: GraphPayload;
@@ -42,19 +61,29 @@ export async function GET(
         queryEvaluation?: string;
         modelResponses?: unknown[];
         error?: boolean;
+        predictedIntent?: InvestigationIntent;
+        intentConfidence?: IntentConfidence;
+        strategyUsed?: string;
       };
     }>(
       `
       SELECT
-        message_id AS id,
-        role,
-        content,
-        timestamp,
-        created_at_iso AS "createdAt",
-        payload
-      FROM chat_messages
-      WHERE case_id = $1
-      ORDER BY created_at ASC
+        m.message_id AS id,
+        m.role,
+        m.content,
+        m.timestamp,
+        m.created_at_iso AS "createdAt",
+        m.payload,
+        l.true_intent AS "trueIntent",
+        l.reason_tag AS "intentReasonTag",
+        l.notes AS "intentNotes",
+        l.reviewed_by AS "reviewedBy",
+        to_char(l.reviewed_at, 'YYYY-MM-DD\"T\"HH24:MI:SSOF') AS "reviewedAt"
+      FROM chat_messages m
+      LEFT JOIN investigation_intent_labels l
+        ON l.message_id = m.message_id
+      WHERE m.case_id = $1
+      ORDER BY m.created_at ASC
       LIMIT 3000
       `,
       [caseId],
@@ -66,6 +95,11 @@ export async function GET(
       content: string;
       timestamp: string;
       createdAt: string;
+      trueIntent?: string | null;
+      intentReasonTag?: string | null;
+      intentNotes?: string | null;
+      reviewedBy?: string | null;
+      reviewedAt?: string | null;
       payload: {
         records?: Record<string, unknown>[];
         graph?: GraphPayload;
@@ -74,6 +108,9 @@ export async function GET(
         queryEvaluation?: string;
         modelResponses?: unknown[];
         error?: boolean;
+        predictedIntent?: InvestigationIntent;
+        intentConfidence?: IntentConfidence;
+        strategyUsed?: string;
       };
     }) => ({
       id: row.id,
@@ -100,6 +137,30 @@ export async function GET(
         ? row.payload.modelResponses
         : undefined,
       error: Boolean(row.payload?.error),
+      predictedIntent:
+        typeof row.payload?.predictedIntent === 'string' &&
+        isInvestigationIntent(row.payload.predictedIntent)
+          ? row.payload.predictedIntent
+          : undefined,
+      intentConfidence:
+        typeof row.payload?.intentConfidence === 'string' &&
+        isIntentConfidence(row.payload.intentConfidence)
+          ? row.payload.intentConfidence
+          : undefined,
+      strategyUsed:
+        typeof row.payload?.strategyUsed === 'string'
+          ? row.payload.strategyUsed
+          : undefined,
+      trueIntent:
+        typeof row.trueIntent === 'string' && isInvestigationIntent(row.trueIntent)
+          ? row.trueIntent
+          : undefined,
+      intentReasonTag:
+        typeof row.intentReasonTag === 'string' ? row.intentReasonTag : undefined,
+      intentNotes:
+        typeof row.intentNotes === 'string' ? row.intentNotes : undefined,
+      reviewedBy: typeof row.reviewedBy === 'string' ? row.reviewedBy : undefined,
+      reviewedAt: typeof row.reviewedAt === 'string' ? row.reviewedAt : undefined,
     }));
 
     return NextResponse.json({ success: true, messages }, { status: 200 });
@@ -154,6 +215,18 @@ export async function POST(
       ? body.modelResponses
       : undefined,
     error: Boolean(body.error),
+    predictedIntent:
+      typeof body.predictedIntent === 'string' &&
+      isInvestigationIntent(body.predictedIntent)
+        ? body.predictedIntent
+        : undefined,
+    intentConfidence:
+      typeof body.intentConfidence === 'string' &&
+      isIntentConfidence(body.intentConfidence)
+        ? body.intentConfidence
+        : undefined,
+    strategyUsed:
+      typeof body.strategyUsed === 'string' ? body.strategyUsed : undefined,
   };
 
   try {

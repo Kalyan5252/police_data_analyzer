@@ -1,22 +1,29 @@
 [
   {
-    "label": "Call activity should include communication + presence strategy",
+    "label": "Event location lookup should support UUID",
     "ok": false,
-    "reason": "fetch failed"
+    "reason": "request_failed: 429 {\"error\":{\"message\":\"Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01jk00zbj6f3arxa51shrknrw2` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99802, Requested 1543. Please try again in 19m22.08s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}",
+    "cypher": "",
+    "response": {
+      "error": "429 {\"error\":{\"message\":\"Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01jk00zbj6f3arxa51shrknrw2` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99802, Requested 1543. Please try again in 19m22.08s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}"
+    }
   },
   {
-    "label": "IP events should prioritize InternetSession path",
+    "label": "Phone-location path traversal should be bounded multi-hop",
     "ok": false,
-    "reason": "fetch failed"
+    "reason": "request_failed: 429 {\"error\":{\"message\":\"Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01jk00zbj6f3arxa51shrknrw2` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99799, Requested 2903. Please try again in 38m54.528s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}",
+    "cypher": "",
+    "response": {
+      "error": "429 {\"error\":{\"message\":\"Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01jk00zbj6f3arxa51shrknrw2` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99799, Requested 2903. Please try again in 38m54.528s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}"
+    }
   },
   {
-    "label": "Phone to IP should not force Device hop",
+    "label": "Most-called counterpart intent should use aggregation",
     "ok": false,
-    "reason": "fetch failed"
-  },
-  {
-    "label": "Phone-to-phone hidden link should include path strategy",
-    "ok": false,
-    "reason": "fetch failed"
+    "reason": "request_failed: 429 {\"error\":{\"message\":\"Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01jk00zbj6f3arxa51shrknrw2` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99796, Requested 856. Please try again in 9m23.328s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}",
+    "cypher": "",
+    "response": {
+      "error": "429 {\"error\":{\"message\":\"Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_01jk00zbj6f3arxa51shrknrw2` service tier `on_demand` on tokens per day (TPD): Limit 100000, Used 99796, Requested 856. Please try again in 9m23.328s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}"
+    }
   }
 ]

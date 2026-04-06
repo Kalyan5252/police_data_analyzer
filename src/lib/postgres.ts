@@ -86,11 +86,32 @@ export async function ensurePgSchema(): Promise<void> {
         );
       `);
 
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS investigation_intent_labels (
+          id BIGSERIAL PRIMARY KEY,
+          message_id TEXT NOT NULL REFERENCES chat_messages(message_id) ON DELETE CASCADE,
+          case_id TEXT NOT NULL REFERENCES case_histories(case_id) ON DELETE CASCADE,
+          predicted_intent TEXT NOT NULL,
+          true_intent TEXT NOT NULL,
+          reason_tag TEXT NULL,
+          notes TEXT NULL,
+          reviewed_by TEXT NOT NULL DEFAULT 'investigator',
+          reviewed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE (message_id)
+        );
+      `);
+
       await client.query(
         'CREATE INDEX IF NOT EXISTS idx_chat_messages_case_created_at ON chat_messages(case_id, created_at);',
       );
       await client.query(
         'CREATE INDEX IF NOT EXISTS idx_case_histories_updated_at ON case_histories(updated_at DESC);',
+      );
+      await client.query(
+        'CREATE INDEX IF NOT EXISTS idx_intent_labels_case_reviewed_at ON investigation_intent_labels(case_id, reviewed_at DESC);',
+      );
+      await client.query(
+        'CREATE INDEX IF NOT EXISTS idx_intent_labels_true_pred ON investigation_intent_labels(true_intent, predicted_intent);',
       );
     } finally {
       client.release();

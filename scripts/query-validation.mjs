@@ -45,11 +45,14 @@ function containsAll(haystack, needles = []) {
 }
 
 async function runCase(testCase) {
+  const caseIncludeGraph =
+    typeof testCase.includeGraph === 'boolean' ? testCase.includeGraph : includeGraph;
+  const caseHistory = Array.isArray(testCase.history) ? testCase.history : [];
   const body = {
     message: testCase.message,
     stream: false,
-    includeGraph,
-    history: [],
+    includeGraph: caseIncludeGraph,
+    history: caseHistory,
   };
   if (caseId) body.caseId = caseId;
 
