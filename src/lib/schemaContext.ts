@@ -52,6 +52,20 @@ GENERAL SEMANTICS (guidance, may evolve):
 - For co-location questions ("same place", "same cell", "at what time"), use:
 -   PhoneNumber -[:SEEN_AT]- PresenceEvent -[:AT_LOCATION]- Location
 - and return PresenceEvent timestamps/event_ids for both numbers (not only shared cell_id summary).
+- For "events at cell/tower/location" of a phone number, do NOT assume CommunicationEvent directly links to Location.
+- Use this inference pattern:
+-   1) fetch PhoneNumber -> CommunicationEvent timestamps
+-   2) fetch PhoneNumber -> PresenceEvent -> Location timestamps for the target cell_id
+-   3) correlate timestamps (exact or time-of-day match) to infer CommunicationEvent at that cell.
+- For generic "activities/events of a phone number", fetch both CommunicationEvent and PresenceEvent streams.
+- If CommunicationEvent and PresenceEvent align by normalized type and timestamp (or time-of-day), treat them as the same underlying activity and merge:
+-   - keep CommunicationEvent event details
+-   - attach PresenceEvent location (cell_id) and presence timestamp
+- This merge helps infer event-location context without assuming direct CommunicationEvent -> Location links.
+- For "location of <event_id>" queries, ALWAYS check BOTH labels:
+-   1) PresenceEvent.event_id directly for AT_LOCATION -> Location (primary location evidence)
+-   2) CommunicationEvent.event_id and infer location via linked phone PresenceEvent timestamp correlation
+- Do not treat CommunicationEvent as the only source for location lookup.
 - CommunicationEvent SEEN_AT Location or AT_LOCATION Location via intermediate nodes, depending on ingestion.
 - PhoneNumber USED_DEVICE Device; Device USED IPAddress; Device SEEN_AT Location.
 - Internet activity path (preferred for IPDR-style lookups): PhoneNumber CONNECTED_TO InternetSession CONNECTED_TO IPAddress.

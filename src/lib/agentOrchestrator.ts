@@ -208,6 +208,75 @@ function extractCellId(userQuery: string): string | null {
   return null;
 }
 
+function extractEventId(userQuery: string): string | null {
+  const explicit = userQuery.match(
+    /\bevent(?:\s*id)?\b\s*[:=]?\s*['"]?([0-9a-fA-F-]{16,})/i,
+  );
+  if (explicit) return explicit[1];
+  const uuid = userQuery.match(
+    /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/,
+  );
+  return uuid ? uuid[0] : null;
+}
+
+function detectEventLocationIntent(
+  userQuery: string,
+): { eventId: string } | null {
+  const q = userQuery.toLowerCase();
+  const asksLocation = /\blocation\b|\bcell\b|\bcell id\b|\btower\b|\bwhere\b/.test(
+    q,
+  );
+  if (!asksLocation) return null;
+  const eventId = extractEventId(userQuery);
+  if (!eventId) return null;
+  return { eventId };
+}
+
+function buildEventLocationFromBothSourcesQuery(eventId: string): string {
+  const safeEventId = escapeCypherLiteral(eventId);
+  return `MATCH (ce:CommunicationEvent {event_id: '${safeEventId}'})
+OPTIONAL MATCH (src:PhoneNumber)-[:INITIATED]->(ce)
+OPTIONAL MATCH (ce)-[:TARGET]->(dst:PhoneNumber)
+WITH ce, [n IN (collect(DISTINCT src.msisdn) + collect(DISTINCT dst.msisdn)) WHERE n IS NOT NULL] AS linked_numbers
+UNWIND CASE WHEN size(linked_numbers) = 0 THEN [NULL] ELSE linked_numbers END AS linked_msisdn
+OPTIONAL MATCH (p:PhoneNumber {msisdn: linked_msisdn})-[:SEEN_AT]-(pe:PresenceEvent)-[:AT_LOCATION]-(loc:Location)
+WITH ce, linked_numbers, collect(DISTINCT {
+  presence_event_id: pe.event_id,
+  presence_type: pe.type,
+  presence_timestamp: toString(coalesce(pe.timestamp, pe.time_stamp)),
+  cell_id: loc.cell_id
+}) AS pe_candidates
+WITH ce, linked_numbers,
+  [pc IN pe_candidates WHERE pc.presence_timestamp IS NOT NULL AND (
+    replace(pc.presence_timestamp, ' 00:00:00 ', ' ') = replace(toString(ce.timestamp), ' 00:00:00 ', ' ')
+    OR right(replace(pc.presence_timestamp, ' 00:00:00 ', ' '), 8) = right(replace(toString(ce.timestamp), ' 00:00:00 ', ' '), 8)
+  )] AS matched_presence
+RETURN
+  'CommunicationEvent' AS source_event_label,
+  ce.event_id AS event_id,
+  ce.type AS event_type,
+  toString(ce.timestamp) AS event_timestamp,
+  ce.duration AS event_duration,
+  linked_numbers,
+  [m IN matched_presence | m.presence_event_id] AS matched_presence_event_ids,
+  [m IN matched_presence | m.cell_id] AS inferred_cell_ids,
+  [m IN matched_presence | m.presence_timestamp] AS matched_presence_timestamps
+UNION ALL
+MATCH (pe:PresenceEvent {event_id: '${safeEventId}'})-[:AT_LOCATION]-(loc:Location)
+OPTIONAL MATCH (p:PhoneNumber)-[:SEEN_AT]-(pe)
+RETURN
+  'PresenceEvent' AS source_event_label,
+  pe.event_id AS event_id,
+  pe.type AS event_type,
+  toString(coalesce(pe.timestamp, pe.time_stamp)) AS event_timestamp,
+  pe.duration AS event_duration,
+  collect(DISTINCT p.msisdn) AS linked_numbers,
+  [pe.event_id] AS matched_presence_event_ids,
+  collect(DISTINCT loc.cell_id) AS inferred_cell_ids,
+  [toString(coalesce(pe.timestamp, pe.time_stamp))] AS matched_presence_timestamps
+LIMIT 20`;
+}
+
 function extractLatestCellIdFromHistory(history: ConversationTurn[]): string | null {
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const turn = history[i];
@@ -378,14 +447,64 @@ ORDER BY hop_count ASC
 LIMIT ${PATH_RETURN_LIMIT}`,
     },
     {
-      name: 'Shared communication/location evidence',
+      name: 'Shared communication/location evidence with temporal overlap',
       strategy: 'intermediate_path',
       cypher: `MATCH (a:PhoneNumber {msisdn: '${a}'}), (b:PhoneNumber {msisdn: '${b}'})
 OPTIONAL MATCH (a)-[:INITIATED|TARGET]-(ce:CommunicationEvent)-[:INITIATED|TARGET]-(b)
-OPTIONAL MATCH (a)-[:SEEN_AT]-(pea:PresenceEvent)-[:AT_LOCATION|SEEN_AT]-(loc:Location)<-[:AT_LOCATION|SEEN_AT]-(peb:PresenceEvent)-[:SEEN_AT]-(b)
-WITH a, b, collect(DISTINCT ce.event_id) AS common_event_ids, collect(DISTINCT loc.cell_id) AS common_cell_ids
-RETURN a.msisdn AS number_a, b.msisdn AS number_b, common_event_ids, common_cell_ids, size(common_event_ids) + size(common_cell_ids) AS link_strength
+OPTIONAL MATCH (a)-[:SEEN_AT]-(pea:PresenceEvent)-[:AT_LOCATION]-(loc:Location)<-[:AT_LOCATION]-(peb:PresenceEvent)-[:SEEN_AT]-(b)
+WITH a, b, ce, loc,
+  collect(DISTINCT toString(coalesce(pea.timestamp, pea.time_stamp))) AS a_presence_timestamps,
+  collect(DISTINCT toString(coalesce(peb.timestamp, peb.time_stamp))) AS b_presence_timestamps,
+  collect(DISTINCT pea.duration) AS a_presence_durations,
+  collect(DISTINCT peb.duration) AS b_presence_durations
+WITH a, b,
+  collect(DISTINCT ce.event_id) AS common_event_ids,
+  collect(DISTINCT loc.cell_id) AS common_cell_ids,
+  collect(DISTINCT {
+    cell_id: loc.cell_id,
+    a_timestamps: a_presence_timestamps,
+    b_timestamps: b_presence_timestamps,
+    a_durations: a_presence_durations,
+    b_durations: b_presence_durations
+  }) AS co_location_evidence
+WITH a, b, common_event_ids, common_cell_ids, co_location_evidence,
+  [x IN co_location_evidence WHERE x.cell_id IS NOT NULL] AS valid_location_evidence
+UNWIND CASE WHEN size(valid_location_evidence) = 0 THEN [NULL] ELSE valid_location_evidence END AS ev
+WITH a, b, common_event_ids, common_cell_ids, valid_location_evidence, ev,
+  CASE
+    WHEN ev IS NULL THEN []
+    ELSE [t IN [x IN ev.a_timestamps | right(replace(x, ' 00:00:00 ', ' '), 8)]
+      WHERE t IN [y IN ev.b_timestamps | right(replace(y, ' 00:00:00 ', ' '), 8)]]
+  END AS overlap_tod
+WITH a, b, common_event_ids, common_cell_ids, valid_location_evidence,
+  collect(DISTINCT {cell_id: CASE WHEN ev IS NULL THEN NULL ELSE ev.cell_id END, overlap_tod: overlap_tod}) AS overlap_evidence
+WITH a, b, common_event_ids, common_cell_ids, valid_location_evidence,
+  [o IN overlap_evidence WHERE o.cell_id IS NOT NULL] AS overlap_evidence_clean
+RETURN a.msisdn AS number_a,
+  b.msisdn AS number_b,
+  common_event_ids,
+  common_cell_ids,
+  valid_location_evidence[0..20] AS co_location_evidence,
+  overlap_evidence_clean[0..20] AS overlap_evidence,
+  reduce(s = 0, o IN overlap_evidence_clean | s + size(o.overlap_tod)) AS temporal_overlap_count,
+  size(common_event_ids) + size(common_cell_ids) + reduce(s = 0, o IN overlap_evidence_clean | s + size(o.overlap_tod)) AS link_strength
 LIMIT 1`,
+    },
+    {
+      name: 'Co-location overlap timeline',
+      strategy: 'intermediate_path',
+      cypher: `MATCH (a:PhoneNumber {msisdn: '${a}'})-[:SEEN_AT]-(pea:PresenceEvent)-[:AT_LOCATION]-(loc:Location)<-[:AT_LOCATION]-(peb:PresenceEvent)-[:SEEN_AT]-(b:PhoneNumber {msisdn: '${b}'})
+WITH loc,
+  toString(coalesce(pea.timestamp, pea.time_stamp)) AS a_ts,
+  toString(coalesce(peb.timestamp, peb.time_stamp)) AS b_ts,
+  right(replace(toString(coalesce(pea.timestamp, pea.time_stamp)), ' 00:00:00 ', ' '), 8) AS a_tod,
+  right(replace(toString(coalesce(peb.timestamp, peb.time_stamp)), ' 00:00:00 ', ' '), 8) AS b_tod,
+  pea.duration AS a_duration,
+  peb.duration AS b_duration
+WHERE a_tod = b_tod
+RETURN loc.cell_id AS cell_id, a_ts AS number_a_presence_timestamp, b_ts AS number_b_presence_timestamp, a_duration, b_duration, a_tod AS matched_time_of_day
+ORDER BY cell_id ASC, matched_time_of_day ASC
+LIMIT 200`,
     },
   ];
 }
@@ -423,6 +542,21 @@ function extractIsoDate(userQuery: string): string | null {
     return `${yyyy}-${mm}-${dd}`;
   }
   return null;
+}
+
+function isoDateToExcelSerial(dateIso: string): string | null {
+  const m = dateIso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const yyyy = Number(m[1]);
+  const mm = Number(m[2]);
+  const dd = Number(m[3]);
+  if (!Number.isFinite(yyyy) || !Number.isFinite(mm) || !Number.isFinite(dd)) {
+    return null;
+  }
+  const base = Date.UTC(1899, 11, 30, 0, 0, 0);
+  const target = Date.UTC(yyyy, mm - 1, dd, 0, 0, 0);
+  const serial = Math.floor((target - base) / 86_400_000);
+  return Number.isFinite(serial) ? String(serial) : null;
 }
 
 function extractLatestMsisdnFromHistory(history: ConversationTurn[]): string | null {
@@ -536,6 +670,114 @@ function detectEventsOnSameDateFollowUpIntent(
   if (!date) return null;
 
   return { msisdn, date };
+}
+
+function detectUnifiedActivityIntent(
+  userQuery: string,
+  history: ConversationTurn[],
+): { msisdn: string; date?: string } | null {
+  const q = userQuery.toLowerCase();
+  const asksActivity = /\bactivity\b|\bactivities\b|\bevents\b|\bevent\b/.test(q);
+  if (!asksActivity) return null;
+
+  // Let more specific intents handle this.
+  if (/\bcall activity\b|\bcalls\b|\breceived\b|\bincoming\b|\boutgoing\b/.test(q)) {
+    return null;
+  }
+  if (/\bcell\b|\btower\b|\blocation\b/.test(q)) {
+    return null;
+  }
+
+  const explicitMsisdn = extractMsisdn(userQuery);
+  const msisdn = explicitMsisdn || extractLatestMsisdnFromHistory(history);
+  if (!msisdn) return null;
+
+  const explicitDate = extractIsoDate(userQuery);
+  const sameDateRef = hasSameDateReference(userQuery);
+  const date =
+    explicitDate ||
+    (sameDateRef ? extractLatestDateFromHistory(history) : null) ||
+    undefined;
+
+  return { msisdn, date };
+}
+
+function buildUnifiedActivityMergeQuery(msisdn: string, date?: string): string {
+  const safeMsisdn = escapeCypherLiteral(msisdn);
+  const safeDate = date ? escapeCypherLiteral(date) : '';
+  const dateSerial = date ? isoDateToExcelSerial(date) : null;
+
+  const ceDateFilter = date
+    ? `AND toString(ce.timestamp) STARTS WITH '${safeDate}'`
+    : '';
+  const peDateFilter = date
+    ? `AND (
+  toString(coalesce(pe.timestamp, pe.time_stamp)) STARTS WITH '${safeDate}'
+  ${dateSerial ? `OR toString(coalesce(pe.timestamp, pe.time_stamp)) STARTS WITH '${dateSerial}'` : ''}
+)`
+    : '';
+
+  return `MATCH (p:PhoneNumber {msisdn: '${safeMsisdn}'})
+OPTIONAL MATCH (p)-[:INITIATED|TARGET]-(ce:CommunicationEvent)
+WHERE ce.event_id IS NOT NULL
+  ${ceDateFilter}
+OPTIONAL MATCH (ce)-[:INITIATED|TARGET]-(other:PhoneNumber)
+WHERE other.msisdn <> p.msisdn
+WITH p, ce, collect(DISTINCT other.msisdn) AS ce_counterparts
+WITH p, collect(DISTINCT {
+  source: 'communication',
+  event_id: ce.event_id,
+  raw_type: ce.type,
+  norm_type: toUpper(replace(coalesce(ce.type, ''), ' ROAMING', '')),
+  ts_norm: replace(toString(ce.timestamp), ' 00:00:00 ', ' '),
+  tod: right(replace(toString(ce.timestamp), ' 00:00:00 ', ' '), 8),
+  duration: ce.duration,
+  counterpart_numbers: ce_counterparts
+}) AS ce_rows
+OPTIONAL MATCH (p)-[:SEEN_AT]-(pe:PresenceEvent)-[:AT_LOCATION]-(loc:Location)
+WHERE pe.event_id IS NOT NULL
+  ${peDateFilter}
+WITH ce_rows, collect(DISTINCT {
+  source: 'presence',
+  event_id: pe.event_id,
+  raw_type: pe.type,
+  norm_type: toUpper(replace(coalesce(pe.type, ''), ' ROAMING', '')),
+  ts_norm: replace(toString(coalesce(pe.timestamp, pe.time_stamp)), ' 00:00:00 ', ' '),
+  tod: right(replace(toString(coalesce(pe.timestamp, pe.time_stamp)), ' 00:00:00 ', ' '), 8),
+  duration: pe.duration,
+  cell_id: loc.cell_id
+}) AS pe_rows
+WITH ce_rows, pe_rows,
+  [c IN ce_rows | c + {matched: [p IN pe_rows WHERE p.norm_type = c.norm_type AND p.tod = c.tod][0]}] AS paired
+WITH ce_rows, pe_rows, paired,
+  [p IN pe_rows WHERE size([c IN ce_rows WHERE c.norm_type = p.norm_type AND c.tod = p.tod]) = 0] AS pe_only
+WITH
+  [x IN paired | {
+    event_type: x.raw_type,
+    event_timestamp: x.ts_norm,
+    event_duration: x.duration,
+    communication_event_id: x.event_id,
+    counterpart_numbers: coalesce(x.counterpart_numbers, []),
+    presence_event_id: CASE WHEN x.matched IS NULL THEN NULL ELSE x.matched.event_id END,
+    presence_timestamp: CASE WHEN x.matched IS NULL THEN NULL ELSE x.matched.ts_norm END,
+    cell_id: CASE WHEN x.matched IS NULL THEN NULL ELSE x.matched.cell_id END,
+    merged_with_presence: x.matched IS NOT NULL
+  }] +
+  [p IN pe_only | {
+    event_type: p.raw_type,
+    event_timestamp: p.ts_norm,
+    event_duration: p.duration,
+    communication_event_id: NULL,
+    counterpart_numbers: [],
+    presence_event_id: p.event_id,
+    presence_timestamp: p.ts_norm,
+    cell_id: p.cell_id,
+    merged_with_presence: false
+  }] AS unified
+UNWIND unified AS ev
+RETURN ev.event_type AS event_type, ev.event_timestamp AS event_timestamp, ev.event_duration AS event_duration, ev.communication_event_id AS communication_event_id, ev.presence_event_id AS presence_event_id, ev.cell_id AS cell_id, ev.counterpart_numbers AS counterpart_numbers, ev.merged_with_presence AS merged_with_presence, ev.presence_timestamp AS presence_timestamp
+ORDER BY ev.event_timestamp ASC
+LIMIT 300`;
 }
 
 function buildEventsOnDateQuery(msisdn: string, date: string): string {
@@ -1083,7 +1325,7 @@ async function synthesizeFinalAnswer(
   const system: LLMMessage = {
     role: 'system',
     content:
-      'You are a senior investigative analyst. You receive multiple model opinions and the underlying graph query and results. Your job is to synthesize them into ONE clear, concise answer for a police officer.\n\nVERY IMPORTANT OUTPUT RULES:\n- Start with a direct answer in 2–4 short sentences.\n- When the user explicitly asks to “show data”, prefer **tables or bullet-point lists of records** instead of long narrative reports.\n- Format output in valid Markdown for UI rendering.\n- When showing a table, use proper GitHub-style markdown table syntax with a header separator row.\n- If the user asks for a flow chart or diagram, output Mermaid inside a fenced block: ```mermaid ... ```.\n- Avoid email-style headers (no To:, From:, Subject:, dates, or greetings like “Hello Officer”).\n- Prefer neutral section headings like “Facts from the Data” only when useful.\n- Prefer statements that are clearly supported by the data.\n- If records include path fields (p, hop_count, relationship_chain), treat that as concrete hidden-link evidence.\n- If records include initiated_numbers/target_numbers/counterpart_numbers/event_imeis, use them explicitly in reasoning.\n- If records include a_timestamps/b_timestamps (co-location evidence), surface those times explicitly.\n- Do NOT claim caller/callee/counterpart or timestamps are unavailable when corresponding fields are present and non-empty in records.\n- If records are non-empty for connectivity queries, do NOT conclude "no relationship".\n- If models disagree, call out the uncertainty and explain which parts are certain vs speculative.\n- Always distinguish facts (directly in the data) from hypotheses.\n- If the data is insufficient for a conclusion, say so and optionally suggest follow-up queries.',
+      'You are a senior investigative analyst. You receive multiple model opinions and the underlying graph query and results. Your job is to synthesize them into ONE clear, concise answer for a police officer.\n\nVERY IMPORTANT OUTPUT RULES:\n- Start with a direct answer in 2–4 short sentences.\n- When the user explicitly asks to “show data”, prefer **tables or bullet-point lists of records** instead of long narrative reports.\n- Format output in valid Markdown for UI rendering.\n- When showing a table, use proper GitHub-style markdown table syntax with a header separator row.\n- If the user asks for a flow chart or diagram, output Mermaid inside a fenced block: ```mermaid ... ```.\n- Avoid email-style headers (no To:, From:, Subject:, dates, or greetings like “Hello Officer”).\n- Prefer neutral section headings like “Facts from the Data” only when useful.\n- Prefer statements that are clearly supported by the data.\n- If records include path fields (p, hop_count, relationship_chain), treat that as concrete hidden-link evidence.\n- If records include initiated_numbers/target_numbers/counterpart_numbers/event_imeis, use them explicitly in reasoning.\n- If records include a_timestamps/b_timestamps (co-location evidence), surface those times explicitly.\n- If records include temporal_overlap_count/overlap_evidence/matched_time_of_day, explicitly assess probable co-presence strength from those fields.\n- Do NOT claim caller/callee/counterpart or timestamps are unavailable when corresponding fields are present and non-empty in records.\n- If records are non-empty for connectivity queries, do NOT conclude "no relationship".\n- If models disagree, call out the uncertainty and explain which parts are certain vs speculative.\n- Always distinguish facts (directly in the data) from hypotheses.\n- If the data is insufficient for a conclusion, say so and optionally suggest follow-up queries.',
   };
 
   const recordsJson =
@@ -1159,6 +1401,12 @@ export async function runInvestigationTurn(
     userQuery,
     options.history ?? [],
   );
+  const eventLocationIntent = detectEventLocationIntent(userQuery);
+  const unifiedActivityIntent = detectUnifiedActivityIntent(
+    userQuery,
+    options.history ?? [],
+  );
+  const eventsAtCellIntent = detectPhoneEventsAtCellIntent(userQuery);
   const coLocationFollowUpIntent = detectCoLocationTimeFollowUpIntent(
     userQuery,
     options.history ?? [],
@@ -1176,7 +1424,49 @@ export async function runInvestigationTurn(
   const ipEventIntent = detectIpToEventIntent(userQuery);
   const genericIntent = detectGenericComplexRelationshipIntent(userQuery);
   let candidateQueries: QueryCandidate[] = [];
-  if (coLocationFollowUpIntent) {
+  if (eventLocationIntent) {
+    candidateQueries = [
+      {
+        name: 'Event location from both sources (CommunicationEvent + PresenceEvent)',
+        strategy: 'intermediate_path',
+        cypher: buildEventLocationFromBothSourcesQuery(eventLocationIntent.eventId),
+      },
+    ];
+    await emit({
+      stage: 'planning_query',
+      message: `Detected event-location intent for event ${eventLocationIntent.eventId}. Querying both CommunicationEvent and PresenceEvent evidence paths.`,
+    });
+  } else if (unifiedActivityIntent) {
+    candidateQueries = [
+      {
+        name: 'Unified activity merge (communication + presence)',
+        strategy: 'intermediate_path',
+        cypher: buildUnifiedActivityMergeQuery(
+          unifiedActivityIntent.msisdn,
+          unifiedActivityIntent.date,
+        ),
+      },
+    ];
+    await emit({
+      stage: 'planning_query',
+      message: `Detected unified activity intent for ${unifiedActivityIntent.msisdn}${unifiedActivityIntent.date ? ` on ${unifiedActivityIntent.date}` : ''}. Merging CommunicationEvent and PresenceEvent by normalized timestamp/type.`,
+    });
+  } else if (eventsAtCellIntent) {
+    candidateQueries = [
+      {
+        name: 'Phone events at cell via timestamp correlation',
+        strategy: 'intermediate_path',
+        cypher: buildPhoneEventsAtCellQuery(
+          eventsAtCellIntent.msisdn,
+          eventsAtCellIntent.cellId,
+        ),
+      },
+    ];
+    await emit({
+      stage: 'planning_query',
+      message: `Detected events-at-cell intent for ${eventsAtCellIntent.msisdn} at ${eventsAtCellIntent.cellId}. Correlating CommunicationEvent and PresenceEvent timestamps.`,
+    });
+  } else if (coLocationFollowUpIntent) {
     candidateQueries = buildCoLocationCandidates(
       coLocationFollowUpIntent.a,
       coLocationFollowUpIntent.b,
