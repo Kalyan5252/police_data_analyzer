@@ -1,0 +1,22 @@
+[
+  {
+    "label": "Call activity should include communication + presence strategy",
+    "ok": false,
+    "reason": "fetch failed"
+  },
+  {
+    "label": "IP events should prioritize InternetSession path",
+    "ok": false,
+    "reason": "fetch failed"
+  },
+  {
+    "label": "Phone to IP should not force Device hop",
+    "ok": false,
+    "reason": "fetch failed"
+  },
+  {
+    "label": "Phone-to-phone hidden link should include path strategy",
+    "ok": false,
+    "reason": "fetch failed"
+  }
+]

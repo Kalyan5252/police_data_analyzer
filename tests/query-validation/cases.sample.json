@@ -1,0 +1,50 @@
+[
+  {
+    "name": "Call activity should include communication + presence strategy",
+    "message": "get the call activity of 7989747580",
+    "expectAny": [
+      "CommunicationEvent",
+      "PresenceEvent",
+      "SEEN_AT"
+    ],
+    "forbidAny": [
+      "Text cannot be parsed to a Date"
+    ]
+  },
+  {
+    "name": "IP events should prioritize InternetSession path",
+    "message": "in which events does the i.p address 163.70.138.62 involved",
+    "expectAny": [
+      "InternetSession",
+      "CONNECTED_TO",
+      "session_id"
+    ],
+    "forbidAny": [
+      "CommunicationEvent"
+    ],
+    "forbidMode": "all"
+  },
+  {
+    "name": "Phone to IP should not force Device hop",
+    "message": "ip address of 919959473744",
+    "expectAny": [
+      "PhoneNumber",
+      "USED",
+      "InternetSession",
+      "IPAddress"
+    ],
+    "forbidAny": [
+      "-[:USED]->(ip:IPAddress)",
+      "USED]->(ip:IPAddress"
+    ]
+  },
+  {
+    "name": "Phone-to-phone hidden link should include path strategy",
+    "message": "get the link between 7989747580 and 8309250357",
+    "expectAny": [
+      "shortestPath",
+      "[*1..",
+      "relationship_chain"
+    ]
+  }
+]
