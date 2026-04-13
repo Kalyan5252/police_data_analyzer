@@ -24,12 +24,7 @@ The system utilizes a modern, decoupled architecture consisting of a primary ful
 
 - **Purpose:** Handles application metadata, user accounts, and relationships such as "Friends Lists" using JSONB storage capabilities.
 
-### 4. Cloud Storage (AWS S3)
-
-- **Purpose:** Securely stores ingested documents and images.
-- **Working Procedure:** Context menus in the file management UI can generate secure, time-limited S3 pre-signed URLs for internal access or external sharing.
-
-### 5. Data Ingestion Service (Python)
+### 4. Data Ingestion Service (Python)
 
 - **Purpose:** Handles the robust data ingestion of various investigative documents into the Neo4j database.
 - **Architecture:** Built as a FastAPI service to provide immediate, high-available data processing.
@@ -48,7 +43,7 @@ The system utilizes a modern, decoupled architecture consisting of a primary ful
 - **Node.js Environment:** Uses ES modules, Next.js 16.1.6, and React 19.
 - **Model Integrations:** OpenAI, Groq SDK, and Google Generative AI for core reasoning, Cypher generation.
 - **Testing & Evaluation:** Includes automated LLM-as-a-judge test scripts (`scripts/llm-judge.mjs`) to validate query accuracy, orchestrator intent selection, and plotting metrics (`scripts/plot_llm_judge.py`).
-- **Security:** Neo4j credentials, AWS keys, and tenant identification are managed via explicit environmental variables rather than hardcoded credentials.
+- **Security:** Neo4j credentials and tenant identification are managed via explicit environmental variables rather than hardcoded credentials.
 
 ## Setup Instructions
 
@@ -56,7 +51,9 @@ The system utilizes a modern, decoupled architecture consisting of a primary ful
    ```bash
    npm install
    ```
-2. Configure `.env` with tenant keys, Neo4j URIs, PostgreSQL strings, and AI API keys.
+2. Configure `.env` with the necessary environmental keys. You will need to initialize:
+   - **Database Credentials:** `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `POSTGRES_URL`
+   - **AI Model API Keys:** `OPENAI_API_KEY`, `GOOGLE_GENAI_API_KEY`, `GROQ_API_KEY`
 3. Start the application:
    ```bash
    npm run dev
