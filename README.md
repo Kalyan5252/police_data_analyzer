@@ -1,6 +1,6 @@
 # CPR and IPDR Platform
 
-This project is a comprehensive Call Detail Record (CDR) and Internet Protocol Detail Record (IPDR) analysis platform, designed for advanced investigative intelligence. It provides deep interconnectivity analysis using a graph database, supplemented by Retrieval-Augmented Generation (RAG) and CLIP-based image search capabilities.
+This project is a comprehensive crime investigation analysis system designed for advanced investigative intelligence using Call Detail Records (CDR) and Internet Protocol Detail Records (IPDR). It provides deep interconnectivity analysis using a graph database to assist in complex law enforcement and investigative scenarios.
 
 ## Architecture Overview
 
@@ -10,8 +10,8 @@ The system utilizes a modern, decoupled architecture consisting of a primary ful
 
 - **Framework:** Next.js (App Router) with React, built and optimized for high-performance dashboards and data visualization.
 - **Styling:** Tailwind CSS for a responsive, modern interface.
-- **Backend APIs:** Next.js API Routes handle file uploads, cloud file management, and orchestrating interactions with databases and external AI services.
-- **Agent Orchestrator:** The core orchestration layer (`agentOrchestrator.ts`) translates natural language queries into Cypher queries using an LLM. It intelligently determines intent (e.g., finding the shortest communication path between numbers, determining co-location based on cell towers, or mapping activity timelines).
+- **Backend APIs:** Next.js API Routes handle file uploads, cloud file management, and orchestrating interactions with databases.
+- **Agent Orchestrator:** The core orchestration layer (`agentOrchestrator.ts`) drives the agentic workflows. It analyzes natural language queries to detect the investigative intent (such as `CoLocationIntent`, `PhoneToLocationPath`, `CallActivity`, or `UnifiedActivity`) using strict pattern matching combined with an LLM. It plans queries across multiple strategies (e.g., `shortest_path`, `all_paths`, `intermediate_path`), securely generating and repairing Cypher queries, enforcing maximum traversal hops (capped at 4) to ensure graph safety, evaluating results, and synthesizing a comprehensive final answer for the user.
 
 ### 2. Graph Database (Neo4j)
 
@@ -29,30 +29,24 @@ The system utilizes a modern, decoupled architecture consisting of a primary ful
 - **Purpose:** Securely stores ingested documents and images.
 - **Working Procedure:** Context menus in the file management UI can generate secure, time-limited S3 pre-signed URLs for internal access or external sharing.
 
-### 5. RAG Pipeline Service (Python)
+### 5. Data Ingestion Service (Python)
 
-- **Purpose:** Processes unstructured data such as PDFs and documents.
-- **Components:** Utilizes Google Gemini for generating embeddings and ChromaDB as the underlying vector storage.
-- **Working Procedure:** As documents are ingested, they are chunked, vectorized by Gemini, and stored in ChromaDB. The main Next.js platform queries this separate service to retrieve augmented context for user queries.
-
-### 6. CLIP Image Search Service (Python)
-
-- **Purpose:** Enables reverse image search and semantic textual search over uploaded images.
-- **Architecture:** Hosted on an isolated server to load and serve the PyTorch-based CLIP model for high-performance embedding generation.
-- **Working Procedure:** When images are uploaded to the Next.js app, they are sent to the CLIP service with `userid` and `fileid` metadata. The service generates embeddings. During search, textual queries or reference images pass through the CLIP API to find visually or semantically similar images in the database.
+- **Purpose:** Handles the robust data ingestion of various investigative documents into the Neo4j database.
+- **Architecture:** Built as a FastAPI service to provide immediate, high-available data processing.
+- **Working Procedure:** It acts as a dedicated routing layer where specific types of documents are directed to their respective specialized routes. For example, incoming requests are routed to endpoints like `/cpr`, `/ipdr`, `/td`, `/sdr`, and `/bank` depending on the file type, ensuring tailored parsing and insertion into the graph database.
 
 ## Working Procedure
 
 1. **Data Ingestion:** User uploads raw investigative files (SDR, BANK, CDR, IPDR, TD, PDF, or Images) via the Data Loaders interface.
-2. **Parsing & Routing:** The frontend validates parsing fields (like `account_number` for banking records) and routes them to dedicated API ingestion endpoints.
-3. **Graphing & Vectorization:** Structured data (CDR/IPDR) is parsed and inserted into Neo4j with associated nodes and temporal bounds. Textual data goes to the RAG python service for indexing in ChromaDB. Image data goes to the CLIP python service.
-4. **Intelligent Querying:** The investigator uses the chat interface. The system captures the query, passes historical context and metadata to the Next.js API.
-5. **Intent Resolution & Execution:** The LLM Orchestrator deduces the underlying investigative intent (e.g., `CoLocationIntent`, `PhoneToLocationPath`), generates Cypher or vector search commands, retrieves data, and synthesizes a final analytical response with visual graphs / data tables.
+2. **Parsing & Routing:** The frontend validates initial parsing fields (like `account_number` for banking records) and passes the data.
+3. **Graphing & Ingestion:** The Python FastAPI service receives the files via dedicated routes (`/cpr`, `/ipdr`, `/td`, `/sdr`, `/bank`) and processes the structured data, parsing and comprehensively inserting the entities into Neo4j with associated nodes and temporal bounds.
+4. **Intelligent Querying:** The investigator uses the chat interface. The system captures the query and passes historical context and metadata to the Next.js Agent Orchestrator.
+5. **Intent Resolution & Execution:** The LLM Orchestrator deduces the underlying investigative intent through strict validations and LLM reasoning, executes bounded and repaired Cypher queries against Neo4j, retrieves matching patterns (like overlapping activity or communication paths), and finally synthesizes an analytical response detailing the findings.
 
 ## Project Specifications
 
 - **Node.js Environment:** Uses ES modules, Next.js 16.1.6, and React 19.
-- **Model Integrations:** OpenAI, Groq SDK, and Google Generative AI for core reasoning, Cypher generation, and embeddings.
+- **Model Integrations:** OpenAI, Groq SDK, and Google Generative AI for core reasoning, Cypher generation.
 - **Testing & Evaluation:** Includes automated LLM-as-a-judge test scripts (`scripts/llm-judge.mjs`) to validate query accuracy, orchestrator intent selection, and plotting metrics (`scripts/plot_llm_judge.py`).
 - **Security:** Neo4j credentials, AWS keys, and tenant identification are managed via explicit environmental variables rather than hardcoded credentials.
 
