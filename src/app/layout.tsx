@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { Geist, Geist_Mono } from 'next/font/google';
+import { Suspense } from 'react';
 import './globals.css';
 import Sidebar from '@/components/Sidebar';
 const geistSans = Geist({
@@ -27,7 +28,11 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background flex`}
       >
-        <Sidebar />
+        <Suspense
+          fallback={<div className="w-72 border-r border-brand-light/30 bg-slate-50" />}
+        >
+          <Sidebar />
+        </Suspense>
         <main className="flex-1 ml-72 min-h-screen">{children}</main>
       </body>
     </html>

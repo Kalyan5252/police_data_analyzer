@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   Search,
@@ -620,7 +620,7 @@ type CaseSummary = {
   lastMessagePreview: string;
 };
 
-export default function AnalyzePage() {
+function AnalyzePageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const caseParam = searchParams.get('case');
@@ -2151,5 +2151,13 @@ export default function AnalyzePage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function AnalyzePage() {
+  return (
+    <Suspense fallback={<div className="flex-1 ml-72 min-h-screen bg-slate-50" />}>
+      <AnalyzePageContent />
+    </Suspense>
   );
 }
