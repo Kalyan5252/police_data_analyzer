@@ -13,7 +13,10 @@ import {
 import * as XLSX from 'xlsx';
 import { detectFileType, type FileType } from '@/utils/detectFileType';
 
-const API_BASE = 'http://127.0.0.1:8000/api/v1/loaders';
+const baseUrl = process.env.NEXT_PUBLIC_BACKEND_URL
+  ? process.env.NEXT_PUBLIC_BACKEND_URL.replace(/\/$/, '')
+  : 'http://127.0.0.1:8000';
+const API_BASE = `${baseUrl}/api/v1/loaders`;
 
 /** Maps detected file types to their backend route segments */
 const ROUTE_MAP: Record<FileType, string | null> = {
